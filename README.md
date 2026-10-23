@@ -13,6 +13,12 @@ Northstar PDF is an original-brand, offline-first Windows PDF editor. It opens P
 
 The crop operation changes the visible crop box; underlying content outside the box remains in the PDF and can be revealed by changing the crop. It is not secure redaction. Rebuilding page sequences may not preserve every advanced PDF feature (for example, all document-level metadata, named destinations, or complex forms).
 
+## Task workspaces and tool palette
+
+The workspace strip offers Home, Read, Edit, Organize, Comment, Fill & Sign, Protect, and Create & Convert presets inspired by familiar PDF editor workflows. The movable **Tools** dock filters to the actions currently implemented for each task. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect currently exposes save/export actions only. Advanced features such as text/image object editing, OCR, signatures, true redaction, Office conversion, and PDF/A/X checks remain unavailable and are not shown as working controls.
+
+The selected workspace and dock layout are saved locally. Existing document tabs remain separate from the task workspace tabs.
+
 ## Build and download
 
 Every push to `main` builds `NorthstarPDF.exe` on a clean Windows runner. In GitHub, open **Actions → Build Windows app → latest successful run → Artifacts → NorthstarPDF-Windows**. Extract the artifact ZIP and double-click `NorthstarPDF.exe`. It is a one-file build and does not require Python or Qt installed on your PC. The app itself does not check for updates or contact a service. GitHub Actions is used only to build and deliver the binary.
