@@ -9,9 +9,10 @@ from offline_guard import install_offline_guard
 install_offline_guard()
 
 from pdf_operations import delete_page, extract_pages, merge_pdfs, rotate_page
+from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
@@ -38,13 +39,64 @@ class PdfTab(QWidget):
         self.view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self.view.setPageSpacing(14)
         self.error: str | None = None
+        self.password: str | None = None
         self.document.passwordRequired.connect(self._request_password)
         result = self.document.load(self.path)
         if result != QPdfDocument.Error.None_:
             self.error = f"Could not open PDF (error: {result})."
+        self.edit_session = EditSession(self.path)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.view)
+
+    @property
+    def dirty(self) -> bool:
+        return self.edit_session.dirty
+
+    def _reload_working_copy(self, page: int) -> None:
+        self.document.close()
+        result = self.document.load(str(self.edit_session.working_path))
+        if result != QPdfDocument.Error.None_:
+            raise RuntimeError(f"Could not reload edited PDF (error: {result}).")
+        QTimer.singleShot(0, lambda: self.view.pageNavigator().jump(
+            min(page, max(0, self.document.pageCount() - 1)), QPointF(0, 0)
+        ))
+
+    def rotate_current_page(self) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.rotate(page, password=self.password)
+        self._reload_working_copy(page)
+
+    def undo_edit(self) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.undo()
+        self._reload_working_copy(page)
+
+    def redo_edit(self) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.redo()
+        self._reload_working_copy(page)
+
+    def save_edits(self) -> None:
+        if not self.dirty:
+            return
+        page = self.view.pageNavigator().currentPage()
+        self.document.close()
+        try:
+            self.edit_session.save()
+        except Exception:
+            self.document.load(str(self.edit_session.working_path))
+            raise
+        self._reload_working_copy(page)
+
+    def discard_edits(self) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.discard()
+        self._reload_working_copy(page)
+
+    def cleanup(self) -> None:
+        self.document.close()
+        self.edit_session.cleanup()
 
     def _request_password(self) -> None:
         password, accepted = QInputDialog.getText(
@@ -54,6 +106,7 @@ class PdfTab(QWidget):
         if not accepted:
             self.error = "Password entry was cancelled."
             return
+        self.password = password
         self.document.setPassword(password)
         QTimer.singleShot(0, lambda: self.document.load(self.path))
 
@@ -152,12 +205,22 @@ class MainWindow(QMainWindow):
         open_action = file_menu.addAction("&Open…")
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_dialog)
+        save_action = file_menu.addAction("&Save")
+        save_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_action.triggered.connect(self._save_active)
         self.recent_menu = file_menu.addMenu("Open &Recent")
         self._refresh_recent_menu()
         file_menu.addSeparator()
         exit_action = file_menu.addAction("E&xit")
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(QApplication.quit)
+        edit_menu = self.menuBar().addMenu("&Edit")
+        self.undo_action = edit_menu.addAction("&Undo")
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.undo_action.triggered.connect(self._undo_active)
+        self.redo_action = edit_menu.addAction("&Redo")
+        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.redo_action.triggered.connect(self._redo_active)
         page_menu = self.menuBar().addMenu("&Pages")
         rotate_action = page_menu.addAction("Rotate current page clockwise")
         rotate_action.triggered.connect(self._rotate_current_page)
@@ -351,12 +414,12 @@ class MainWindow(QMainWindow):
         tab = self._active()
         if not tab:
             return
-        output = self._output_path("_rotated")
-        if not output:
-            return
         try:
-            rotate_page(tab.path, output, tab.view.pageNavigator().currentPage())
-            self._finish_page_operation(output)
+            tab.rotate_current_page()
+            index = self.tabs.indexOf(tab)
+            base = Path(tab.path).name
+            self.tabs.setTabText(index, base + (" *" if tab.dirty else ""))
+            self.statusBar().showMessage("Rotation is pending. Save with Ctrl+S or close and choose Save.", 6000)
         except Exception as exc:
             QMessageBox.warning(self, "Could not rotate page", str(exc))
 
@@ -401,6 +464,63 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Could not merge PDFs", str(exc))
 
+    def _save_active(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        try:
+            tab.save_edits()
+            self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name)
+            self.statusBar().showMessage("Saved changes to the original PDF.", 5000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save PDF", str(exc))
+
+    def _undo_active(self) -> None:
+        tab = self._active()
+        if not tab or not tab.edit_session.can_undo:
+            return
+        tab.undo_edit()
+        self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name + (" *" if tab.dirty else ""))
+
+    def _redo_active(self) -> None:
+        tab = self._active()
+        if not tab or not tab.edit_session.can_redo:
+            return
+        tab.redo_edit()
+        self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name + (" *" if tab.dirty else ""))
+
+    def _confirm_pending_edits(self, tab: PdfTab) -> bool:
+        if not tab.dirty:
+            return True
+        answer = QMessageBox.question(
+            self, "Unsaved changes",
+            f"Save changes to {Path(tab.path).name} before closing?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Discard:
+            tab.discard_edits()
+            return True
+        try:
+            tab.save_edits()
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save PDF", str(exc))
+            return False
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        pdf_tabs = [self.tabs.widget(i) for i in range(self.tabs.count())]
+        pdf_tabs = [tab for tab in pdf_tabs if isinstance(tab, PdfTab)]
+        for tab in pdf_tabs:
+            if not self._confirm_pending_edits(tab):
+                event.ignore()
+                return
+        for tab in pdf_tabs:
+            tab.cleanup()
+        event.accept()
+
     def _toggle_full_screen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
@@ -416,6 +536,10 @@ class MainWindow(QMainWindow):
 
     def _close_tab(self, index: int) -> None:
         widget = self.tabs.widget(index)
+        if isinstance(widget, PdfTab):
+            if not self._confirm_pending_edits(widget):
+                return
+            widget.cleanup()
         self.tabs.removeTab(index)
         if widget:
             widget.deleteLater()
