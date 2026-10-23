@@ -82,3 +82,20 @@ def test_sticky_note_is_staged_undoable_and_saved(tmp_path: Path) -> None:
         assert PdfReader(source).pages[0]["/Annots"]
     finally:
         session.cleanup()
+
+
+def test_delete_is_pending_and_undoable(tmp_path: Path) -> None:
+    source = tmp_path / "doc.pdf"
+    make_pdf(source)
+    session = EditSession(source)
+    try:
+        session.delete_page(0)
+        assert len(PdfReader(source).pages) == 2
+        assert len(PdfReader(session.working_path).pages) == 1
+        session.undo()
+        assert len(PdfReader(session.working_path).pages) == 2
+        session.redo()
+        session.save()
+        assert len(PdfReader(source).pages) == 1
+    finally:
+        session.cleanup()
