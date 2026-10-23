@@ -8,6 +8,8 @@ from pathlib import Path
 from offline_guard import install_offline_guard
 install_offline_guard()
 
+from pdf_operations import delete_page, extract_pages, merge_pdfs, rotate_page
+
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
@@ -156,6 +158,15 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction("E&xit")
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(QApplication.quit)
+        page_menu = self.menuBar().addMenu("&Pages")
+        rotate_action = page_menu.addAction("Rotate current page clockwise")
+        rotate_action.triggered.connect(self._rotate_current_page)
+        delete_action = page_menu.addAction("Delete current page…")
+        delete_action.triggered.connect(self._delete_current_page)
+        extract_action = page_menu.addAction("Extract current page…")
+        extract_action.triggered.connect(self._extract_current_page)
+        merge_action = page_menu.addAction("Merge PDFs…")
+        merge_action.triggered.connect(self._merge_documents)
         view_menu = self.menuBar().addMenu("&View")
         fullscreen = view_menu.addAction("Full screen")
         fullscreen.setShortcut(QKeySequence("F11"))
@@ -323,6 +334,72 @@ class MainWindow(QMainWindow):
         tab.view.setZoomMode(zoom_mode)
         if zoom_mode == QPdfView.ZoomMode.Custom:
             tab.view.setZoomFactor(1.0)
+
+    def _output_path(self, suffix: str) -> str | None:
+        tab = self._active()
+        if not tab:
+            return None
+        suggested = str(Path(tab.path).with_name(Path(tab.path).stem + suffix + ".pdf"))
+        path, _ = QFileDialog.getSaveFileName(self, "Save modified PDF as", suggested, "PDF files (*.pdf)")
+        return path or None
+
+    def _finish_page_operation(self, output: str) -> None:
+        self.open_file(output)
+        self.statusBar().showMessage(f"Saved a new PDF: {output}", 5000)
+
+    def _rotate_current_page(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        output = self._output_path("_rotated")
+        if not output:
+            return
+        try:
+            rotate_page(tab.path, output, tab.view.pageNavigator().currentPage())
+            self._finish_page_operation(output)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not rotate page", str(exc))
+
+    def _delete_current_page(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        if QMessageBox.question(self, "Delete page", "Delete the current page in a new copy of this PDF?") != QMessageBox.StandardButton.Yes:
+            return
+        output = self._output_path("_page_removed")
+        if not output:
+            return
+        try:
+            delete_page(tab.path, output, tab.view.pageNavigator().currentPage())
+            self._finish_page_operation(output)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not delete page", str(exc))
+
+    def _extract_current_page(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        output = self._output_path("_page_extracted")
+        if not output:
+            return
+        try:
+            extract_pages(tab.path, output, [tab.view.pageNavigator().currentPage()])
+            self._finish_page_operation(output)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not extract page", str(exc))
+
+    def _merge_documents(self) -> None:
+        sources, _ = QFileDialog.getOpenFileNames(self, "Choose PDFs to merge", "", "PDF files (*.pdf)")
+        if len(sources) < 2:
+            return
+        output, _ = QFileDialog.getSaveFileName(self, "Save merged PDF as", "", "PDF files (*.pdf)")
+        if not output:
+            return
+        try:
+            merge_pdfs(sources, output)
+            self._finish_page_operation(output)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not merge PDFs", str(exc))
 
     def _toggle_full_screen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
