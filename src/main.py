@@ -173,8 +173,11 @@ class MainWindow(QMainWindow):
         if saved_state:
             self.restoreState(saved_state)
         workspace = self.settings.value("workspace", "Read")
-        workspace_index = self.workspace_tabs.findText(workspace)
-        self.workspace_tabs.setCurrentIndex(max(0, workspace_index))
+        workspace_index = next(
+            (i for i in range(self.workspace_tabs.count())
+             if self.workspace_tabs.tabText(i) == workspace), 0
+        )
+        self.workspace_tabs.setCurrentIndex(workspace_index)
         for path in files or []:
             self.open_file(path)
         if self.tabs.count() == 0:
@@ -887,7 +890,11 @@ def self_test() -> int:
         result = document.load(name)
         ok = result == QPdfDocument.Error.InvalidFileFormat
         window = MainWindow()
-        window.workspace_tabs.setCurrentIndex(window.workspace_tabs.indexOf("Organize"))
+        organize_index = next(
+            i for i in range(window.workspace_tabs.count())
+            if window.workspace_tabs.tabText(i) == "Organize"
+        )
+        window.workspace_tabs.setCurrentIndex(organize_index)
         ui_ok = window.tool_dock.windowTitle() == "Tools · Organize" and window.tool_dock.isFloating() is False
         window.close()
         print("PDFium malformed-file smoke test:", "PASS" if ok else f"FAIL ({result})")
