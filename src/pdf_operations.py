@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
-from pypdf.annotations import Text
+from pypdf.annotations import Ellipse, FreeText, Highlight, Line, PolyLine, Rectangle, Text
+from pypdf.generic import (ArrayObject, DictionaryObject, FloatObject, NameObject,
+                           NumberObject, RectangleObject, TextStringObject)
 from pypdf.errors import PdfReadError
 
 
@@ -248,3 +250,93 @@ def protect_pdf(source: str | Path, output: str | Path, password: str,
     writer = PdfWriter(clone_from=reader)
     writer.encrypt(password, password, algorithm="AES-256")
     _write(writer, output)
+
+
+
+def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
+                       kind: str, rect: tuple[float, float, float, float],
+                       text: str = "", vertices: list[tuple[float, float]] | None = None,
+                       password: str | None = None, color: str = "ffd54f") -> None:
+    """Add a standard PDF text or drawing annotation as a new revision."""
+    _require_new_output(source, output)
+    reader = _reader(source, password)
+    if not 0 <= page_index < len(reader.pages):
+        raise IndexError("Page index is outside the document.")
+    x1, y1, x2, y2 = (float(value) for value in rect)
+    if not (x1 < x2 and y1 < y2):
+        raise ValueError("Annotation area must have positive width and height.")
+    page_box = reader.pages[page_index].mediabox
+    if not (float(page_box.left) <= x1 < x2 <= float(page_box.right)
+            and float(page_box.bottom) <= y1 < y2 <= float(page_box.top)):
+        raise ValueError("Annotation must fit within the page bounds.")
+    color = color.strip().lstrip("#")
+    if len(color) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in color):
+        raise ValueError("Annotation color must be a six-digit RGB hex value.")
+
+    if kind == "note":
+        if not text.strip():
+            raise ValueError("Note text cannot be empty.")
+        annotation = Text(rect=(x1, y1, x2, y2), text=text.strip())
+    elif kind == "text":
+        if not text.strip():
+            raise ValueError("Text cannot be empty.")
+        annotation = FreeText(
+            text=text.strip(), rect=(x1, y1, x2, y2), font="Helvetica",
+            font_size="12pt", font_color=color, border_color=color,
+            background_color="ffffff",
+        )
+    elif kind == "highlight":
+        points = ArrayObject([
+            FloatObject(x1), FloatObject(y2), FloatObject(x2), FloatObject(y2),
+            FloatObject(x1), FloatObject(y1), FloatObject(x2), FloatObject(y1),
+        ])
+        annotation = Highlight(rect=(x1, y1, x2, y2), quad_points=points,
+                               highlight_color=color)
+    elif kind in ("underline", "strikeout"):
+        subtype = "/Underline" if kind == "underline" else "/StrikeOut"
+        annotation = DictionaryObject({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject(subtype),
+            NameObject("/Rect"): RectangleObject((x1, y1, x2, y2)),
+            NameObject("/QuadPoints"): ArrayObject([
+                FloatObject(x1), FloatObject(y2), FloatObject(x2), FloatObject(y2),
+                FloatObject(x1), FloatObject(y1), FloatObject(x2), FloatObject(y1),
+            ]),
+            NameObject("/C"): ArrayObject([
+                FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
+            ]),
+            NameObject("/Contents"): TextStringObject(kind.title()),
+        })
+    elif kind == "rectangle":
+        annotation = Rectangle(rect=(x1, y1, x2, y2))
+        annotation[NameObject("/C")] = ArrayObject([
+            FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
+        ])
+    elif kind == "ellipse":
+        annotation = Ellipse(rect=(x1, y1, x2, y2))
+        annotation[NameObject("/C")] = ArrayObject([
+            FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
+        ])
+    elif kind in ("line", "arrow"):
+        annotation = Line((x1, y1), (x2, y2), (x1, y1, x2, y2))
+        annotation[NameObject("/C")] = ArrayObject([
+            FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
+        ])
+        if kind == "arrow":
+            annotation[NameObject("/LE")] = ArrayObject([
+                NameObject("/None"), NameObject("/OpenArrow")
+            ])
+    elif kind == "pen":
+        path_points = vertices or [(x1, y1), (x2, y2)]
+        if len(path_points) < 2:
+            raise ValueError("A pen stroke needs at least two points.")
+        annotation = PolyLine(path_points)
+        annotation[NameObject("/C")] = ArrayObject([
+            FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
+        ])
+    else:
+        raise ValueError(f"Unknown annotation tool: {kind}")
+
+    writer = PdfWriter(clone_from=reader)
+    writer.add_annotation(page_index, annotation)
+    _write(writer, output, password if reader.is_encrypted else None)
