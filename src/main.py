@@ -70,6 +70,8 @@ class InteractivePdfView(QPdfView):
             location.x() + pointer.x() / old_zoom - pointer.x() / new_zoom,
             location.y() + pointer.y() / old_zoom - pointer.y() / new_zoom,
         )
+        self.setZoomMode(QPdfView.ZoomMode.Custom)
+        self.setZoomFactor(new_zoom)
         nav.jump(page, new_location, new_zoom)
         event.accept()
 
@@ -294,7 +296,7 @@ class MainWindow(QMainWindow):
         self._make_workspace_tabs()
         self.tabs.currentChanged.connect(self._refresh_active_document)
         self.tabs.tabCloseRequested.connect(self._close_tab)
-        self.statusBar().showMessage("Ready · offline")
+        self.statusBar().showMessage("Ready · offline · scroll to zoom · middle-drag to pan")
         saved_geometry = self.settings.value("windowGeometry")
         saved_state = self.settings.value("windowState")
         if saved_geometry:
@@ -938,6 +940,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Open a PDF before selecting an annotation tool.", 4000)
             return
         tab.view.set_annotation_tool(kind)
+        tab.view.setFocus()
         labels = {
             "text": "Text box", "note": "Sticky note", "highlight": "Highlight",
             "underline": "Underline", "strikeout": "Strikethrough", "pen": "Freehand pen",
