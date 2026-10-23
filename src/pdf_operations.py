@@ -282,7 +282,7 @@ def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
             raise ValueError("Text cannot be empty.")
         annotation = FreeText(
             text=text.strip(), rect=(x1, y1, x2, y2), font="Helvetica",
-            font_size="12pt", font_color=color, border_color=color,
+            font_size="12pt", font_color="000000", border_color=color,
             background_color="ffffff",
         )
     elif kind == "highlight":
