@@ -13,7 +13,7 @@ from pdf_operations import (add_pdf_annotation, extract_pages, extract_text_file
 from pypdf import PdfReader
 from edit_session import EditSession
 
-from PySide6.QtCore import Qt, QPointF, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QSettings, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
@@ -1146,28 +1146,81 @@ class MainWindow(QMainWindow):
 def self_test() -> int:
     """Small executable smoke check used by the Windows build workflow."""
     from tempfile import NamedTemporaryFile
+    from pypdf import PdfWriter
+
     app = QApplication.instance() or QApplication([])
     with NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(b"this is not a valid PDF")
-        name = f.name
+        malformed_path = f.name
+    with NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        valid_path = f.name
+    writer = PdfWriter()
+    for _ in range(4):
+        writer.add_blank_page(width=612, height=792)
+    with open(valid_path, "wb") as stream:
+        writer.write(stream)
     try:
         document = QPdfDocument()
-        result = document.load(name)
-        ok = result == QPdfDocument.Error.InvalidFileFormat
-        window = MainWindow()
+        result = document.load(malformed_path)
+        malformed_ok = result == QPdfDocument.Error.InvalidFileFormat
+        window = MainWindow([valid_path])
+        window.resize(900, 700)
+        window.show()
+        app.processEvents()
         organize_index = next(
             i for i in range(window.workspace_tabs.count())
             if window.workspace_tabs.tabText(i) == "Organize"
         )
         window.workspace_tabs.setCurrentIndex(organize_index)
-        ui_ok = window.tool_dock.windowTitle() == "Tools · Organize" and window.tool_dock.isFloating() is False
+        ui_ok = (window.tool_dock.windowTitle() == "Tools · Organize"
+                 and window.tool_dock.isFloating() is False)
+
+        view = window._active().view
+        nav = view.pageNavigator()
+        previous_zoom = float(nav.currentZoom())
+
+        class FakeWheel:
+            def angleDelta(self):
+                return QPoint(0, 120)
+            def position(self):
+                return QPointF(120, 120)
+            def accept(self):
+                pass
+
+        view.wheelEvent(FakeWheel())
+        app.processEvents()
+        zoom_ok = float(nav.currentZoom()) > previous_zoom
+
+        class FakeMouse:
+            def __init__(self, button, x, y):
+                self._button = button
+                self._point = QPointF(x, y)
+            def button(self):
+                return self._button
+            def position(self):
+                return self._point
+            def accept(self):
+                pass
+
+        scrollbar = view.verticalScrollBar()
+        scrollbar.setRange(0, 1000)
+        scrollbar.setValue(400)
+        view.mousePressEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 100))
+        view.mouseMoveEvent(FakeMouse(Qt.MouseButton.NoButton, 100, 120))
+        pan_ok = scrollbar.value() == 380
+        view.mouseReleaseEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 120))
         window.close()
-        print("PDFium malformed-file smoke test:", "PASS" if ok else f"FAIL ({result})")
-        print("Task workspace and movable tools panel:", "PASS" if ui_ok else "FAIL")
-        return 0 if ok and ui_ok else 1
+
+        print("PDFium malformed-file smoke test:",
+              "PASS" if malformed_ok else f"FAIL ({result})")
+        print("Task workspaces and movable tools panel:", "PASS" if ui_ok else "FAIL")
+        print("Scroll-wheel zoom:", "PASS" if zoom_ok else "FAIL")
+        print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
+        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok else 1
     finally:
-        document.close()  # Release PDFium's file handle before deleting on Windows.
-        os.unlink(name)
+        document.close()
+        os.unlink(malformed_path)
+        os.unlink(valid_path)
         app.quit()
 
 
