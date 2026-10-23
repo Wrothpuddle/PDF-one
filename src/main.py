@@ -9,7 +9,7 @@ from offline_guard import install_offline_guard
 install_offline_guard()
 
 from pdf_operations import (extract_pages, extract_text_file, merge_pdfs, read_form_fields,
-                            split_pdf)
+                            split_pdf, protect_pdf)
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
@@ -300,6 +300,8 @@ class MainWindow(QMainWindow):
         fill_action.triggered.connect(self._fill_form_fields)
         export_text_action = tools_menu.addAction("Export text…")
         export_text_action.triggered.connect(self._export_text)
+        protect_action = tools_menu.addAction("Password-protect a copy…")
+        protect_action.triggered.connect(self._protect_copy)
         view_menu = self.menuBar().addMenu("&View")
         fullscreen = view_menu.addAction("Full screen")
         fullscreen.setShortcut(QKeySequence("F11"))
@@ -325,6 +327,7 @@ class MainWindow(QMainWindow):
             "Insert pages": insert_action, "Replace page": replace_action,
             "Split PDF": split_action, "Merge PDFs": merge_action,
             "Fill form": fill_action, "Export text": export_text_action,
+            "Protect copy": protect_action,
             "Find text": self.find_action, "Previous match": self.previous_result,
             "Next match": self.next_result, "Full screen": fullscreen,
         }
@@ -380,7 +383,7 @@ class MainWindow(QMainWindow):
                          "Extract page", "Delete page", "Crop page", "Split PDF", "Merge PDFs", "Undo", "Redo"),
             "Comment": ("Sticky note", "Undo", "Redo"),
             "Fill & Sign": ("Fill form", "Save", "Undo", "Redo"),
-            "Protect": ("Save", "Export text"),
+            "Protect": ("Protect copy", "Save", "Export text"),
             "Create & Convert": ("Merge PDFs", "Split PDF", "Extract page", "Export text"),
         }
         self.tool_dock.setWindowTitle(f"Tools · {name}")
@@ -779,6 +782,37 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported local text to {output}", 5000)
         except Exception as exc:
             QMessageBox.warning(self, "Could not export text", str(exc))
+
+    def _protect_copy(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        password, accepted = QInputDialog.getText(
+            self, "Password-protect a copy", "Enter a password for the new PDF:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted:
+            return
+        confirm, accepted = QInputDialog.getText(
+            self, "Confirm password", "Enter the password again:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted:
+            return
+        if password != confirm:
+            QMessageBox.warning(self, "Passwords do not match", "Enter the same password twice.")
+            return
+        suggested = str(Path(tab.path).with_name(Path(tab.path).stem + "_protected.pdf"))
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Save password-protected copy", suggested, "PDF files (*.pdf)"
+        )
+        if not output:
+            return
+        try:
+            protect_pdf(tab.edit_session.working_path, output, password, tab.password)
+            self.statusBar().showMessage(f"Created password-protected PDF: {output}", 6000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not protect PDF", str(exc))
 
     def _merge_documents(self) -> None:
         sources, _ = QFileDialog.getOpenFileNames(self, "Choose PDFs to merge", "", "PDF files (*.pdf)")
