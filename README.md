@@ -1,6 +1,6 @@
 # Northstar PDF
 
-Northstar PDF is an original-brand, offline-first Windows PDF viewer. The current executable focuses on viewing and navigation: multiple tabs, continuous or single-page mode, fit-to-width/page zoom, page labels, bookmarks, text search with result highlighting, recent files, dark theme, and full screen. PDF text selection and copy are supplied by Qt PDF's viewer widget where supported.
+Northstar PDF is an original-brand, offline-first Windows PDF viewer. The current executable focuses on viewing and navigation: multiple tabs, continuous or single-page mode, fit-to-width/page zoom, page labels, bookmarks, text search with result highlighting, recent files, dark theme, and full screen. The Pages menu also supports rotating or deleting the current page, extracting the current page, and merging PDFs into a new file. PDF text selection and copy are supplied by Qt PDF's viewer widget where supported.
 
 ## Build and download
 
@@ -29,10 +29,11 @@ The program installs a Python audit hook before importing Qt. It rejects Python 
 
 - **PySide6 / Qt PDF**: Qt modules are available under LGPLv3, GPLv3, and/or commercial terms depending on module and distribution. Qt PDF uses PDFium internally. Review the exact license notices shipped with the wheel and meet applicable dynamic-linking/replacement and attribution obligations before redistributing the executable. The build artifact bundles Qt libraries in a one-file PyInstaller package; confirm the LGPL compliance model for this distribution before commercial release.
 - **PDFium**: BSD-style license with additional bundled third-party notices. Qt's PDF module includes attribution and license data; release packaging must retain it.
+- **pypdf**: BSD-3-Clause; include the license notice when redistributing.
 - **PyInstaller**: GPL with a bootloader exception; include applicable notices.
 
 This application has not been legally reviewed. The build workflow includes library payloads in the executable, so do not sell or redistribute it until the Qt/PDFium/PyInstaller notice package and LGPL requirements have been verified for the exact versions.
 
 ## Current scope
 
-This is a functional viewer MVP, not an Acrobat replacement. Editing, annotations, OCR, forms, page manipulation, signatures, and conversion are not included in this first executable. Search is literal (Qt PDF's built-in search model), not regex or cross-file search. Two-page spread view and page rotation are not included yet.
+This is a functional viewer MVP, not an Acrobat replacement. Page manipulation currently covers current-page rotate/delete/extract and PDF merge. Reordering, crop, split, insert, annotations, OCR, forms, signatures, and conversion are not included yet. Search is literal (Qt PDF's built-in search model), not regex or cross-file search. Two-page spread view and page rotation are not included yet.
