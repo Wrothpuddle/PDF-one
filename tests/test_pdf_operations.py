@@ -51,7 +51,10 @@ def test_malformed_and_encrypted_pdfs_fail_cleanly(tmp_path: Path) -> None:
     with pytest.raises(PermissionError):
         delete_page(encrypted, tmp_path / "out.pdf", 0)
     delete_page(encrypted, tmp_path / "unlocked.pdf", 0, password="secret")
-    assert len(PdfReader(tmp_path / "unlocked.pdf").pages) == 2
+    secured = PdfReader(tmp_path / "unlocked.pdf")
+    assert secured.is_encrypted
+    assert secured.decrypt("secret")
+    assert len(secured.pages) == 2
 
 
 def test_invalid_page_selection_is_rejected(tmp_path: Path) -> None:
