@@ -56,5 +56,7 @@ def test_invalid_page_selection_is_rejected(tmp_path: Path) -> None:
     make_pdf(source)
     with pytest.raises(IndexError):
         extract_pages(source, tmp_path / "out.pdf", [9])
+    single = tmp_path / "single.pdf"
+    make_pdf(single, 1)
     with pytest.raises(ValueError):
-        delete_page(source, tmp_path / "out.pdf", 0)
+        delete_page(single, tmp_path / "out.pdf", 0)
