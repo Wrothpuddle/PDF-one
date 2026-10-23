@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
     QLineEdit, QListView, QMainWindow, QMessageBox, QSpinBox, QTabWidget,
     QToolBar, QTreeView, QWidget, QHBoxLayout, QVBoxLayout, QTabBar,
+    QToolButton, QScrollArea, QFrame,
 )
 
 APP_NAME = "Northstar PDF"
@@ -151,6 +152,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1320, 860)
         self.settings = QSettings("Northstar", "NorthstarPDF")
+        self.tool_actions: dict[str, QAction] = {}
         self.tabs = QTabWidget(self)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
@@ -159,9 +161,20 @@ class MainWindow(QMainWindow):
         self._make_search_dock()
         self._make_toolbar()
         self._make_menus()
+        self._make_tool_dock()
+        self._make_workspace_tabs()
         self.tabs.currentChanged.connect(self._refresh_active_document)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.statusBar().showMessage("Ready · offline")
+        saved_geometry = self.settings.value("windowGeometry")
+        saved_state = self.settings.value("windowState")
+        if saved_geometry:
+            self.restoreGeometry(saved_geometry)
+        if saved_state:
+            self.restoreState(saved_state)
+        workspace = self.settings.value("workspace", "Read")
+        workspace_index = self.workspace_tabs.findText(workspace)
+        self.workspace_tabs.setCurrentIndex(max(0, workspace_index))
         for path in files or []:
             self.open_file(path)
         if self.tabs.count() == 0:
@@ -189,8 +202,9 @@ class MainWindow(QMainWindow):
         self.search_results.clicked.connect(self._jump_to_search_result)
 
     def _make_toolbar(self) -> None:
-        toolbar = QToolBar("PDF tools", self)
-        toolbar.setMovable(False)
+        toolbar = QToolBar("Document controls", self)
+        toolbar.setObjectName("DocumentControlsToolbar")
+        toolbar.setMovable(True)
         self.addToolBar(toolbar)
         open_action = QAction("Open", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -225,6 +239,7 @@ class MainWindow(QMainWindow):
         self.search_box.returnPressed.connect(self._start_search)
         toolbar.addWidget(self.search_box)
         find_action = QAction("Find", self)
+        self.find_action = find_action
         find_action.setShortcut(QKeySequence.StandardKey.Find)
         find_action.triggered.connect(self._start_search)
         toolbar.addAction(find_action)
@@ -290,8 +305,125 @@ class MainWindow(QMainWindow):
         dark.setCheckable(True)
         dark.setChecked(bool(self.settings.value("darkTheme", False, type=bool)))
         dark.toggled.connect(self._set_dark_theme)
+        view_menu.addAction(self.tool_dock.toggleViewAction())
+        view_menu.addAction(self.nav_dock.toggleViewAction())
+        view_menu.addAction(self.search_dock.toggleViewAction())
         if dark.isChecked():
             self._set_dark_theme(True)
+
+        # Shared action registry feeds the floating task tools panel. Each button
+        # invokes the same QAction as its menu/toolbar counterpart.
+        self.tool_actions = {
+            "Open": open_action, "Save": save_action,
+            "Undo": self.undo_action, "Redo": self.redo_action,
+            "Rotate page": rotate_action, "Delete page": delete_action,
+            "Sticky note": note_action, "Extract page": extract_action,
+            "Reorder pages": reorder_action, "Crop page": crop_action,
+            "Insert pages": insert_action, "Replace page": replace_action,
+            "Split PDF": split_action, "Merge PDFs": merge_action,
+            "Fill form": fill_action, "Export text": export_text_action,
+            "Find text": self.find_action, "Previous match": self.previous_result,
+            "Next match": self.next_result, "Full screen": fullscreen,
+        }
+        dark_action = dark
+        self.tool_actions["Dark theme"] = dark_action
+
+    def _make_workspace_tabs(self) -> None:
+        """Task presets inspired by familiar Acrobat workspaces, with original UI."""
+        bar = QToolBar("Workspaces", self)
+        bar.setObjectName("WorkspaceTabsToolbar")
+        bar.setMovable(False)
+        self.workspace_tabs = QTabBar(bar)
+        self.workspace_tabs.setObjectName("WorkspaceTabs")
+        self.workspace_tabs.setShape(QTabBar.Shape.RoundedNorth)
+        self.workspace_tabs.setExpanding(False)
+        self.workspace_tabs.setDrawBase(False)
+        for name in ("Home", "Read", "Edit", "Organize", "Comment", "Fill & Sign", "Protect", "Create & Convert"):
+            self.workspace_tabs.addTab(name)
+        self.workspace_tabs.currentChanged.connect(self._set_workspace)
+        bar.addWidget(self.workspace_tabs)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
+        self._set_workspace(0)
+
+    def _make_tool_dock(self) -> None:
+        """Build a movable/floating tool palette whose contents follow the workspace."""
+        self.tool_dock = QDockWidget("Tools · Read", self)
+        self.tool_dock.setObjectName("TaskToolsDock")
+        self.tool_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.tool_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.tool_scroll = QScrollArea(self.tool_dock)
+        self.tool_scroll.setWidgetResizable(True)
+        self.tool_content = QWidget(self.tool_scroll)
+        self.tool_layout = QVBoxLayout(self.tool_content)
+        self.tool_layout.setContentsMargins(10, 12, 10, 12)
+        self.tool_layout.setSpacing(7)
+        self.tool_scroll.setWidget(self.tool_content)
+        self.tool_dock.setWidget(self.tool_scroll)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tool_dock)
+
+    def _set_workspace(self, index: int) -> None:
+        if not hasattr(self, "workspace_tabs"):
+            return
+        name = self.workspace_tabs.tabText(index)
+        presets = {
+            "Home": ("Open", "Save"),
+            "Read": ("Find text", "Previous match", "Next match", "Full screen"),
+            "Edit": ("Rotate page", "Fill form", "Export text", "Undo", "Redo"),
+            "Organize": ("Rotate page", "Reorder pages", "Insert pages", "Replace page",
+                         "Extract page", "Delete page", "Crop page", "Split PDF", "Merge PDFs", "Undo", "Redo"),
+            "Comment": ("Sticky note", "Undo", "Redo"),
+            "Fill & Sign": ("Fill form", "Save", "Undo", "Redo"),
+            "Protect": ("Save", "Export text"),
+            "Create & Convert": ("Merge PDFs", "Split PDF", "Extract page", "Export text"),
+        }
+        self.tool_dock.setWindowTitle(f"Tools · {name}")
+        while self.tool_layout.count():
+            item = self.tool_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        heading = QLabel(f"{name} tools", self.tool_content)
+        heading.setStyleSheet("font-size:16px;font-weight:600;padding:4px 2px 8px 2px;")
+        heading.setAccessibleName(f"{name} workspace tools")
+        self.tool_layout.addWidget(heading)
+        for label in presets.get(name, ()):
+            action = self.tool_actions.get(label)
+            if action is None:
+                continue
+            button = QToolButton(self.tool_content)
+            button.setText(label)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setMinimumHeight(34)
+            button.setSizePolicy(button.sizePolicy().horizontalPolicy(),
+                                 button.sizePolicy().verticalPolicy())
+            button.setAccessibleName(label)
+            button.setToolTip(action.toolTip() or action.text().replace("&", ""))
+            button.clicked.connect(action.trigger)
+            self.tool_layout.addWidget(button)
+        divider = QFrame(self.tool_content)
+        divider.setFrameShape(QFrame.Shape.HLine)
+        self.tool_layout.addWidget(divider)
+        note = QLabel(
+            "More Acrobat-class tools are planned. Features not yet implemented are not shown as working controls.",
+            self.tool_content,
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#777;padding:4px;")
+        self.tool_layout.addWidget(note)
+        self.tool_layout.addStretch(1)
+        if name in ("Read", "Edit", "Organize", "Comment", "Fill & Sign"):
+            self.nav_dock.show()
+        if name == "Read":
+            self.search_dock.show()
+        elif name != "Home":
+            self.search_dock.hide()
+        self.settings.setValue("workspace", name)
+        self.tool_dock.show()
+        self.tool_dock.raise_()
 
     def _show_start_page(self) -> None:
         page = QWidget(self)
@@ -713,6 +845,8 @@ class MainWindow(QMainWindow):
                 return
         for tab in pdf_tabs:
             tab.cleanup()
+        self.settings.setValue("windowGeometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
         event.accept()
 
     def _toggle_full_screen(self) -> None:
@@ -752,8 +886,13 @@ def self_test() -> int:
         document = QPdfDocument()
         result = document.load(name)
         ok = result == QPdfDocument.Error.InvalidFileFormat
+        window = MainWindow()
+        window.workspace_tabs.setCurrentIndex(window.workspace_tabs.indexOf("Organize"))
+        ui_ok = window.tool_dock.windowTitle() == "Tools · Organize" and window.tool_dock.isFloating() is False
+        window.close()
         print("PDFium malformed-file smoke test:", "PASS" if ok else f"FAIL ({result})")
-        return 0 if ok else 1
+        print("Task workspace and movable tools panel:", "PASS" if ui_ok else "FAIL")
+        return 0 if ok and ui_ok else 1
     finally:
         document.close()  # Release PDFium's file handle before deleting on Windows.
         os.unlink(name)
