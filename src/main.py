@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from pypdf import PdfReader
 
 # Install the offline guard before loading any UI or PDF libraries.
 from offline_guard import install_offline_guard
@@ -948,14 +949,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _viewport_to_pdf(tab: PdfTab, page_index: int, point: tuple[float, float],
-                         location: QPointF, zoom: float) -> tuple[float, float]:
+                         location: QPointF, zoom: float, box) -> tuple[float, float]:
         page = tab.document.pagePointSize(page_index)
-        pdf = tab.edit_session.working_path
-        from pypdf import PdfReader
-        reader = PdfReader(str(pdf), strict=False)
-        if reader.is_encrypted and tab.password:
-            reader.decrypt(tab.password)
-        box = reader.pages[page_index].mediabox
         view_width = float(page.width()) * zoom
         x_margin = max(0.0, (tab.view.viewport().width() - view_width) / 2.0)
         x_from_top_left = location.x() + max(0.0, point[0] - x_margin) / zoom
