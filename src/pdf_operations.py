@@ -68,7 +68,7 @@ def delete_page(source: str | Path, output: str | Path, page_index: int,
     for index, page in enumerate(reader.pages):
         if index != page_index:
             writer.add_page(page)
-    _write(writer, output)
+    _write(writer, output, password if reader.is_encrypted else None)
 
 
 def extract_pages(source: str | Path, output: str | Path, page_indices: list[int],
@@ -82,7 +82,7 @@ def extract_pages(source: str | Path, output: str | Path, page_indices: list[int
     writer = PdfWriter()
     for index in page_indices:
         writer.add_page(reader.pages[index])
-    _write(writer, output)
+    _write(writer, output, password if reader.is_encrypted else None)
 
 
 def merge_pdfs(sources: list[str | Path], output: str | Path) -> None:
