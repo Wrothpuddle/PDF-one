@@ -8,7 +8,8 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 
 from pdf_operations import (crop_page, delete_page, extract_pages, insert_pages, merge_pdfs,
-                             replace_page, reorder_pages, rotate_page, split_pdf, protect_pdf)
+                             replace_page, reorder_pages, rotate_page, split_pdf, protect_pdf,
+                             add_pdf_annotation)
 
 
 def make_pdf(path: Path, count: int = 3, password: str | None = None) -> None:
@@ -143,3 +144,36 @@ def test_password_protect_rejects_empty_password_and_overwrite(tmp_path: Path) -
         protect_pdf(source, tmp_path / "protected.pdf", "  ")
     with pytest.raises(ValueError, match="original remains unchanged"):
         protect_pdf(source, source, "secret")
+
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_subtype"),
+    [
+        ("note", "/Text"), ("text", "/FreeText"), ("highlight", "/Highlight"),
+        ("underline", "/Underline"), ("strikeout", "/StrikeOut"),
+        ("rectangle", "/Square"), ("ellipse", "/Circle"),
+        ("line", "/Line"), ("arrow", "/Line"), ("pen", "/PolyLine"),
+    ],
+)
+def test_text_and_drawing_annotations(tmp_path: Path, kind: str, expected_subtype: str) -> None:
+    source, output = tmp_path / "source.pdf", tmp_path / f"{kind}.pdf"
+    make_pdf(source, 1)
+    add_pdf_annotation(
+        source, output, 0, kind, (100, 100, 220, 160),
+        text="Sample annotation", vertices=[(100, 100), (150, 130), (220, 160)],
+    )
+    annotation = PdfReader(output).pages[0]["/Annots"][0].get_object()
+    assert annotation["/Subtype"] == expected_subtype
+    assert len(PdfReader(source).pages[0].get("/Annots", [])) == 0
+
+
+def test_annotation_rejects_bad_geometry_and_malformed_pdf(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    make_pdf(source, 1)
+    with pytest.raises(ValueError):
+        add_pdf_annotation(source, tmp_path / "bad.pdf", 0, "rectangle", (50, 50, 50, 80))
+    bad = tmp_path / "malformed.pdf"
+    bad.write_bytes(b"not a PDF")
+    with pytest.raises(Exception):
+        add_pdf_annotation(bad, tmp_path / "bad-output.pdf", 0, "text", (1, 1, 20, 20), "Hi")
