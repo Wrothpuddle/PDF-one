@@ -25,13 +25,16 @@ def _require_new_output(source: str | Path, output: str | Path) -> None:
         raise ValueError("Choose a new output file so the original remains unchanged.")
 
 
-def _write(writer: PdfWriter, output: str | Path) -> None:
+def _write(writer: PdfWriter, output: str | Path, password: str | None = None) -> None:
     output = Path(output)
     if output.suffix.lower() != ".pdf":
         raise ValueError("Output path must end in .pdf")
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_name(output.stem + ".northstar-tmp.pdf")
     try:
+        if password:
+            # Preserve password protection on transformed encrypted documents.
+            writer.encrypt(password, password, algorithm="AES-256")
         with temp.open("wb") as stream:
             writer.write(stream)
         temp.replace(output)
@@ -50,7 +53,7 @@ def rotate_page(source: str | Path, output: str | Path, page_index: int,
         raise IndexError("Page index is outside the document.")
     writer = PdfWriter(clone_from=reader)
     writer.pages[page_index].rotate(degrees)
-    _write(writer, output)
+    _write(writer, output, password if reader.is_encrypted else None)
 
 
 def delete_page(source: str | Path, output: str | Path, page_index: int,
