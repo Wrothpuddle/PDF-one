@@ -966,16 +966,21 @@ class MainWindow(QMainWindow):
         page = int(gesture["page"])
         location = gesture["location"]
         zoom = float(gesture["zoom"])
-        start = self._viewport_to_pdf(tab, page, gesture["start"], location, zoom)
-        end = self._viewport_to_pdf(tab, page, gesture["end"], location, zoom)
+        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
+        if reader.is_encrypted and tab.password:
+            reader.decrypt(tab.password)
+        box = reader.pages[page].mediabox
+        start = self._viewport_to_pdf(tab, page, gesture["start"], location, zoom, box)
+        end = self._viewport_to_pdf(tab, page, gesture["end"], location, zoom, box)
         points = [
-            self._viewport_to_pdf(tab, page, point, location, zoom)
+            self._viewport_to_pdf(tab, page, point, location, zoom, box)
             for point in gesture["points"]
         ]
         if kind == "note":
             x, y = start
-            rect = (x, y, min(x + 22, float(tab.document.pagePointSize(page).width())),
-                    min(y + 22, float(tab.document.pagePointSize(page).height())))
+            x = min(max(x, float(box.left)), float(box.right) - 22)
+            y = min(max(y, float(box.bottom)), float(box.top) - 22)
+            rect = (x, y, x + 22, y + 22)
             text, accepted = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
             if not accepted or not text.strip():
                 return
