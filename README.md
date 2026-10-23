@@ -1,6 +1,6 @@
 # Northstar PDF
 
-Northstar PDF is an original-brand, offline-first Windows PDF viewer. The current executable focuses on viewing and navigation: multiple tabs, continuous or single-page mode, fit-to-width/page zoom, page labels, bookmarks, text search with result highlighting, recent files, dark theme, and full screen. The Pages menu also supports rotating or deleting the current page, extracting the current page, and merging PDFs into a new file. PDF text selection and copy are supplied by Qt PDF's viewer widget where supported.
+Northstar PDF is an original-brand, offline-first Windows PDF viewer. The current executable focuses on viewing and navigation: multiple tabs, continuous or single-page mode, fit-to-width/page zoom, page labels, bookmarks, text search with result highlighting, recent files, dark theme, and full screen. The Pages menu supports rotating or deleting the current page as an unsaved edit, adding a sticky-note annotation, extracting the current page, and merging PDFs into a new file. Rotations, deletions, and notes appear in the open document immediately, can be undone/redone, and are written back to the same PDF when you press Ctrl+S or choose Save when closing. Discard restores the original file. Extraction and merge create separate output PDFs. PDF text selection and copy are supplied by Qt PDF's viewer widget where supported.
 
 ## Build and download
 
@@ -36,4 +36,4 @@ This application has not been legally reviewed. The build workflow includes libr
 
 ## Current scope
 
-This is a functional viewer MVP, not an Acrobat replacement. Page manipulation currently covers current-page rotate/delete/extract and PDF merge. Reordering, crop, split, insert, annotations, OCR, forms, signatures, and conversion are not included yet. Search is literal (Qt PDF's built-in search model), not regex or cross-file search. Two-page spread view and page rotation are not included yet.
+This is a functional viewer MVP, not an Acrobat replacement. Page manipulation currently covers current-page rotate/delete/extract and PDF merge. Sticky-note comments are the first annotation tool. Reordering, crop, split, insert, annotations, OCR, forms, signatures, and conversion are not included yet. Search is literal (Qt PDF's built-in search model), not regex or cross-file search. Two-page spread view and page rotation are not included yet.
