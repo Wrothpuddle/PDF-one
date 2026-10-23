@@ -8,7 +8,7 @@ from pathlib import Path
 from offline_guard import install_offline_guard
 install_offline_guard()
 
-from pdf_operations import delete_page, extract_pages, merge_pdfs, rotate_page
+from pdf_operations import extract_pages, merge_pdfs
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
@@ -65,6 +65,16 @@ class PdfTab(QWidget):
     def rotate_current_page(self) -> None:
         page = self.view.pageNavigator().currentPage()
         self.edit_session.rotate(page, password=self.password)
+        self._reload_working_copy(page)
+
+    def delete_current_page(self) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.delete_page(page, password=self.password)
+        self._reload_working_copy(min(page, self.document.pageCount() - 2))
+
+    def add_sticky_note(self, text: str) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.add_sticky_note(page, text, password=self.password)
         self._reload_working_copy(page)
 
     def undo_edit(self) -> None:
@@ -226,6 +236,8 @@ class MainWindow(QMainWindow):
         rotate_action.triggered.connect(self._rotate_current_page)
         delete_action = page_menu.addAction("Delete current page…")
         delete_action.triggered.connect(self._delete_current_page)
+        note_action = page_menu.addAction("Add sticky note…")
+        note_action.triggered.connect(self._add_sticky_note)
         extract_action = page_menu.addAction("Extract current page…")
         extract_action.triggered.connect(self._extract_current_page)
         merge_action = page_menu.addAction("Merge PDFs…")
@@ -416,9 +428,8 @@ class MainWindow(QMainWindow):
             return
         try:
             tab.rotate_current_page()
-            index = self.tabs.indexOf(tab)
-            base = Path(tab.path).name
-            self.tabs.setTabText(index, base + (" *" if tab.dirty else ""))
+            self._set_tab_modified(tab)
+            self._refresh_active_document()
             self.statusBar().showMessage("Rotation is pending. Save with Ctrl+S or close and choose Save.", 6000)
         except Exception as exc:
             QMessageBox.warning(self, "Could not rotate page", str(exc))
@@ -427,16 +438,34 @@ class MainWindow(QMainWindow):
         tab = self._active()
         if not tab:
             return
-        if QMessageBox.question(self, "Delete page", "Delete the current page in a new copy of this PDF?") != QMessageBox.StandardButton.Yes:
-            return
-        output = self._output_path("_page_removed")
-        if not output:
+        if QMessageBox.question(self, "Delete page", "Delete the current page? This change will be pending until you save.") != QMessageBox.StandardButton.Yes:
             return
         try:
-            delete_page(tab.path, output, tab.view.pageNavigator().currentPage())
-            self._finish_page_operation(output)
+            tab.delete_current_page()
+            self._refresh_active_document()
+            self._set_tab_modified(tab)
+            self.statusBar().showMessage("Page deletion is pending. Save with Ctrl+S or close and choose Save.", 6000)
         except Exception as exc:
             QMessageBox.warning(self, "Could not delete page", str(exc))
+
+    def _add_sticky_note(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        note, accepted = QInputDialog.getMultiLineText(self, "Add sticky note", "Note text:")
+        if not accepted or not note.strip():
+            return
+        try:
+            tab.add_sticky_note(note)
+            self._set_tab_modified(tab)
+            self.statusBar().showMessage("Sticky note is pending. Save with Ctrl+S or close and choose Save.", 6000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not add sticky note", str(exc))
+
+    def _set_tab_modified(self, tab: PdfTab) -> None:
+        index = self.tabs.indexOf(tab)
+        self.tabs.setTabText(index, Path(tab.path).name + (" *" if tab.dirty else ""))
+
 
     def _extract_current_page(self) -> None:
         tab = self._active()
@@ -480,7 +509,7 @@ class MainWindow(QMainWindow):
         if not tab or not tab.edit_session.can_undo:
             return
         tab.undo_edit()
-        self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name + (" *" if tab.dirty else ""))
+        self._set_tab_modified(tab)
 
     def _redo_active(self) -> None:
         tab = self._active()
