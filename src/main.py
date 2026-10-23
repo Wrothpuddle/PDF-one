@@ -8,7 +8,8 @@ from pathlib import Path
 from offline_guard import install_offline_guard
 install_offline_guard()
 
-from pdf_operations import extract_pages, merge_pdfs
+from pdf_operations import (extract_pages, extract_text_file, merge_pdfs, read_form_fields,
+                            split_pdf)
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
@@ -71,6 +72,30 @@ class PdfTab(QWidget):
         page = self.view.pageNavigator().currentPage()
         self.edit_session.delete_page(page, password=self.password)
         self._reload_working_copy(min(page, self.document.pageCount() - 2))
+
+    def reorder_pages(self, order: list[int]) -> None:
+        self.edit_session.reorder(order, password=self.password)
+        self._reload_working_copy(0)
+
+    def crop_current_page(self, left: float, bottom: float, right: float, top: float) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.crop(page, left, bottom, right, top, password=self.password)
+        self._reload_working_copy(page)
+
+    def insert_pages(self, source: str, before_page: int) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.insert(source, before_page, password=self.password)
+        self._reload_working_copy(page)
+
+    def replace_current_page(self, source: str) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.replace(source, page, password=self.password)
+        self._reload_working_copy(page)
+
+    def fill_fields(self, values: dict[str, str]) -> None:
+        page = self.view.pageNavigator().currentPage()
+        self.edit_session.fill_fields(values, password=self.password)
+        self._reload_working_copy(page)
 
     def add_sticky_note(self, text: str) -> None:
         page = self.view.pageNavigator().currentPage()
@@ -240,8 +265,23 @@ class MainWindow(QMainWindow):
         note_action.triggered.connect(self._add_sticky_note)
         extract_action = page_menu.addAction("Extract current page…")
         extract_action.triggered.connect(self._extract_current_page)
+        reorder_action = page_menu.addAction("Reorder pages…")
+        reorder_action.triggered.connect(self._reorder_pages)
+        crop_action = page_menu.addAction("Crop current page…")
+        crop_action.triggered.connect(self._crop_current_page)
+        insert_action = page_menu.addAction("Insert pages from PDF…")
+        insert_action.triggered.connect(self._insert_pages)
+        replace_action = page_menu.addAction("Replace current page…")
+        replace_action.triggered.connect(self._replace_current_page)
+        split_action = page_menu.addAction("Split into one-page PDFs…")
+        split_action.triggered.connect(self._split_pdf)
         merge_action = page_menu.addAction("Merge PDFs…")
         merge_action.triggered.connect(self._merge_documents)
+        tools_menu = self.menuBar().addMenu("&Tools")
+        fill_action = tools_menu.addAction("Fill form fields…")
+        fill_action.triggered.connect(self._fill_form_fields)
+        export_text_action = tools_menu.addAction("Export text…")
+        export_text_action.triggered.connect(self._export_text)
         view_menu = self.menuBar().addMenu("&View")
         fullscreen = view_menu.addAction("Full screen")
         fullscreen.setShortcut(QKeySequence("F11"))
@@ -481,6 +521,129 @@ class MainWindow(QMainWindow):
             self._finish_page_operation(output)
         except Exception as exc:
             QMessageBox.warning(self, "Could not extract page", str(exc))
+
+    def _reorder_pages(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        order, accepted = QInputDialog.getText(
+            self, "Reorder pages", f"Enter all {tab.document.pageCount()} page numbers in the new order, separated by commas:"
+        )
+        if not accepted:
+            return
+        try:
+            values = [int(part.strip()) - 1 for part in order.split(",")]
+            tab.reorder_pages(values)
+            self._refresh_active_document()
+            self._set_tab_modified(tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not reorder pages", str(exc))
+
+    def _crop_current_page(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        text, accepted = QInputDialog.getText(
+            self, "Crop current page",
+            "Enter left,bottom,right,top coordinates in PDF points:"
+        )
+        if not accepted:
+            return
+        try:
+            values = [float(part.strip()) for part in text.split(",")]
+            if len(values) != 4:
+                raise ValueError("Enter exactly four coordinates.")
+            tab.crop_current_page(*values)
+            self._set_tab_modified(tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not crop page", str(exc))
+
+    def _insert_pages(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        source, _ = QFileDialog.getOpenFileName(self, "Choose PDF pages to insert", "", "PDF files (*.pdf)")
+        if not source:
+            return
+        before, accepted = QInputDialog.getInt(
+            self, "Insert pages", f"Insert before page (1 to {tab.document.pageCount() + 1}):",
+            max(1, tab.view.pageNavigator().currentPage() + 1), 1, tab.document.pageCount() + 1
+        )
+        if not accepted:
+            return
+        try:
+            tab.insert_pages(source, before - 1)
+            self._refresh_active_document()
+            self._set_tab_modified(tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not insert pages", str(exc))
+
+    def _replace_current_page(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        source, _ = QFileDialog.getOpenFileName(self, "Choose replacement PDF page", "", "PDF files (*.pdf)")
+        if not source:
+            return
+        try:
+            tab.replace_current_page(source)
+            self._refresh_active_document()
+            self._set_tab_modified(tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not replace page", str(exc))
+
+    def _split_pdf(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        directory = QFileDialog.getExistingDirectory(self, "Choose a folder for the split PDF pages")
+        if not directory:
+            return
+        try:
+            paths = split_pdf(tab.edit_session.working_path, directory, tab.password)
+            self.statusBar().showMessage(f"Created {len(paths)} local PDF files in {directory}", 6000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not split PDF", str(exc))
+
+    def _fill_form_fields(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        try:
+            fields = read_form_fields(tab.edit_session.working_path, tab.password)
+            if not fields:
+                QMessageBox.information(self, "No form fields", "This PDF does not contain editable AcroForm fields.")
+                return
+            prompt = "Enter one field=value pair per line. Fields found:\n" + "\n".join(fields)
+            text, accepted = QInputDialog.getMultiLineText(self, "Fill PDF form", prompt)
+            if not accepted:
+                return
+            values = {}
+            for line in text.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key.strip()] = value.strip()
+            if not values:
+                return
+            tab.fill_fields(values)
+            self._set_tab_modified(tab)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not fill form", str(exc))
+
+    def _export_text(self) -> None:
+        tab = self._active()
+        if not tab:
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF text", str(Path(tab.path).with_suffix(".txt")), "Text files (*.txt)"
+        )
+        if not output:
+            return
+        try:
+            extract_text_file(tab.edit_session.working_path, output, tab.password)
+            self.statusBar().showMessage(f"Exported local text to {output}", 5000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not export text", str(exc))
 
     def _merge_documents(self) -> None:
         sources, _ = QFileDialog.getOpenFileNames(self, "Choose PDFs to merge", "", "PDF files (*.pdf)")
