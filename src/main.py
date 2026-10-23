@@ -428,6 +428,20 @@ class MainWindow(QMainWindow):
         fill_action.triggered.connect(self._fill_form_fields)
         export_text_action = tools_menu.addAction("Export text…")
         export_text_action.triggered.connect(self._export_text)
+        comment_menu = self.menuBar().addMenu("&Comment")
+        annotation_actions = {}
+        for label, kind in (
+            ("Place text box", "text"), ("Place note", "note"),
+            ("Highlight region", "highlight"), ("Underline region", "underline"),
+            ("Strikethrough region", "strikeout"), ("Freehand pen", "pen"),
+            ("Line", "line"), ("Arrow", "arrow"),
+            ("Rectangle", "rectangle"), ("Ellipse", "ellipse"),
+        ):
+            action = comment_menu.addAction(label)
+            action.triggered.connect(
+                lambda checked=False, selected=kind: self._activate_annotation_tool(selected)
+            )
+            annotation_actions[label] = action
         protect_action = tools_menu.addAction("Password-protect a copy…")
         protect_action.triggered.connect(self._protect_copy)
         view_menu = self.menuBar().addMenu("&View")
@@ -456,6 +470,7 @@ class MainWindow(QMainWindow):
             "Split PDF": split_action, "Merge PDFs": merge_action,
             "Fill form": fill_action, "Export text": export_text_action,
             "Protect copy": protect_action,
+            **annotation_actions,
             "Find text": self.find_action, "Previous match": self.previous_result,
             "Next match": self.next_result, "Full screen": fullscreen,
         }
@@ -509,7 +524,9 @@ class MainWindow(QMainWindow):
             "Edit": ("Rotate page", "Fill form", "Export text", "Undo", "Redo"),
             "Organize": ("Rotate page", "Reorder pages", "Insert pages", "Replace page",
                          "Extract page", "Delete page", "Crop page", "Split PDF", "Merge PDFs", "Undo", "Redo"),
-            "Comment": ("Sticky note", "Undo", "Redo"),
+            "Comment": ("Place text box", "Place note", "Highlight region",
+                         "Underline region", "Strikethrough region", "Freehand pen",
+                         "Line", "Arrow", "Rectangle", "Ellipse", "Sticky note", "Undo", "Redo"),
             "Fill & Sign": ("Fill form", "Save", "Undo", "Redo"),
             "Protect": ("Protect copy", "Save", "Export text"),
             "Create & Convert": ("Merge PDFs", "Split PDF", "Extract page", "Export text"),
@@ -593,6 +610,9 @@ class MainWindow(QMainWindow):
                 tab.deleteLater()
                 self.tabs.setCurrentIndex(i)
                 return
+        tab.view.annotationGesture.connect(
+            lambda gesture, target=tab: self._handle_annotation_gesture(target, gesture)
+        )
         index = self.tabs.addTab(tab, Path(path).name)
         self.tabs.setCurrentIndex(index)
         recent = self.settings.value("recentFiles", [], type=list)
@@ -910,6 +930,87 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported local text to {output}", 5000)
         except Exception as exc:
             QMessageBox.warning(self, "Could not export text", str(exc))
+
+    def _activate_annotation_tool(self, kind: str) -> None:
+        tab = self._active()
+        if not tab:
+            self.statusBar().showMessage("Open a PDF before selecting an annotation tool.", 4000)
+            return
+        tab.view.set_annotation_tool(kind)
+        labels = {
+            "text": "Text box", "note": "Sticky note", "highlight": "Highlight",
+            "underline": "Underline", "strikeout": "Strikethrough", "pen": "Freehand pen",
+            "line": "Line", "arrow": "Arrow", "rectangle": "Rectangle", "ellipse": "Ellipse",
+        }
+        self.statusBar().showMessage(
+            f"{labels.get(kind, kind)} active · click or drag on the page · Esc to exit"
+        )
+
+    @staticmethod
+    def _viewport_to_pdf(tab: PdfTab, page_index: int, point: tuple[float, float],
+                         location: QPointF, zoom: float) -> tuple[float, float]:
+        page = tab.document.pagePointSize(page_index)
+        pdf = tab.edit_session.working_path
+        from pypdf import PdfReader
+        reader = PdfReader(str(pdf), strict=False)
+        if reader.is_encrypted and tab.password:
+            reader.decrypt(tab.password)
+        box = reader.pages[page_index].mediabox
+        view_width = float(page.width()) * zoom
+        x_margin = max(0.0, (tab.view.viewport().width() - view_width) / 2.0)
+        x_from_top_left = location.x() + max(0.0, point[0] - x_margin) / zoom
+        y_from_top_left = location.y() + max(0.0, point[1]) / zoom
+        x_from_top_left = min(float(page.width()), max(0.0, x_from_top_left))
+        y_from_top_left = min(float(page.height()), max(0.0, y_from_top_left))
+        return float(box.left) + x_from_top_left, float(box.top) - y_from_top_left
+
+    def _handle_annotation_gesture(self, tab: PdfTab, gesture: dict) -> None:
+        if self.tabs.indexOf(tab) < 0:
+            return
+        kind = gesture["kind"]
+        page = int(gesture["page"])
+        location = gesture["location"]
+        zoom = float(gesture["zoom"])
+        start = self._viewport_to_pdf(tab, page, gesture["start"], location, zoom)
+        end = self._viewport_to_pdf(tab, page, gesture["end"], location, zoom)
+        points = [
+            self._viewport_to_pdf(tab, page, point, location, zoom)
+            for point in gesture["points"]
+        ]
+        if kind == "note":
+            x, y = start
+            rect = (x, y, min(x + 22, float(tab.document.pagePointSize(page).width())),
+                    min(y + 22, float(tab.document.pagePointSize(page).height())))
+            text, accepted = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
+            if not accepted or not text.strip():
+                return
+        else:
+            text = ""
+            if kind == "text":
+                text, accepted = QInputDialog.getMultiLineText(self, "Text box", "Text:")
+                if not accepted or not text.strip():
+                    return
+            x1, y1 = start
+            x2, y2 = end
+            if abs(x2 - x1) < 3:
+                x2 = x1 + 3
+            if abs(y2 - y1) < 3:
+                y2 = y1 + 3
+            rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            if kind == "text" and (abs(x2 - x1) < 24 or abs(y2 - y1) < 16):
+                rect = (rect[0], rect[1], rect[0] + 160, rect[1] + 42)
+        try:
+            tab.edit_session.apply_operation(
+                add_pdf_annotation, page, kind, rect, text, points, password=tab.password
+            )
+            tab._reload_working_copy(page)
+            self._set_tab_modified(tab)
+            tool_name = kind.replace("strikeout", "strikethrough").replace("pen", "freehand")
+            self.statusBar().showMessage(
+                f"{tool_name.title()} annotation pending · Ctrl+S to save · Esc to stop tool", 5000
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not add annotation", str(exc))
 
     def _protect_copy(self) -> None:
         tab = self._active()
