@@ -60,3 +60,16 @@ def test_invalid_page_selection_is_rejected(tmp_path: Path) -> None:
     make_pdf(single, 1)
     with pytest.raises(ValueError):
         delete_page(single, tmp_path / "out.pdf", 0)
+
+
+def test_operations_never_overwrite_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    make_pdf(source)
+    with pytest.raises(ValueError, match="original remains unchanged"):
+        rotate_page(source, source, 0)
+    with pytest.raises(ValueError, match="original remains unchanged"):
+        delete_page(source, source, 0)
+    with pytest.raises(ValueError, match="original remains unchanged"):
+        extract_pages(source, source, [0])
+    with pytest.raises(ValueError, match="source PDFs remain unchanged"):
+        merge_pdfs([source, source], source)
