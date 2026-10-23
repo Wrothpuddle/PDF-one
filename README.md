@@ -15,7 +15,7 @@ The crop operation changes the visible crop box; underlying content outside the 
 
 ## Task workspaces and tool palette
 
-The workspace strip offers Home, Read, Edit, Organize, Comment, Fill & Sign, Protect, and Create & Convert presets inspired by familiar PDF editor workflows. The movable **Tools** dock filters to the actions currently implemented for each task. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect currently exposes save/export actions only. Advanced features such as text/image object editing, OCR, signatures, true redaction, Office conversion, and PDF/A/X checks remain unavailable and are not shown as working controls.
+The workspace strip offers Home, Read, Edit, Organize, Comment, Fill & Sign, Protect, and Create & Convert presets inspired by familiar PDF editor workflows. The movable **Tools** dock filters to the actions currently implemented for each task. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect includes a local AES-256 password-protected copy action, along with save/export. Advanced features such as text/image object editing, OCR, signatures, true redaction, Office conversion, and PDF/A/X checks remain unavailable and are not shown as working controls.
 
 The selected workspace and dock layout are saved locally. Existing document tabs remain separate from the task workspace tabs.
 
