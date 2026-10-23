@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from pdf_operations import rotate_page
+from pdf_operations import add_sticky_note, rotate_page
 
 
 class EditSession:
@@ -38,6 +38,15 @@ class EditSession:
                password: str | None = None) -> Path:
         output = self._temp_dir / f"revision-{len(self._states)}.pdf"
         rotate_page(self.working_path, output, page_index, degrees, password)
+        self._states = self._states[: self._cursor + 1]
+        self._states.append(output)
+        self._cursor += 1
+        return output
+
+    def add_sticky_note(self, page_index: int, text: str,
+                        password: str | None = None) -> Path:
+        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
+        add_sticky_note(self.working_path, output, page_index, text, password)
         self._states = self._states[: self._cursor + 1]
         self._states.append(output)
         self._cursor += 1
