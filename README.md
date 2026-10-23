@@ -4,10 +4,11 @@ Northstar PDF is an original-brand, offline-first Windows PDF editor. It opens P
 
 ## Available in the current build
 
-- Multiple document tabs, continuous or single-page view, fit-to-width/page and 100% zoom, page navigation, full screen, dark theme, recent files, and built-in text search.
+- Multiple document tabs, continuous or single-page view, fit-to-width/page and 100% zoom, page navigation, scroll-wheel zoom, middle-button drag panning, full screen, dark theme, recent files, and built-in text search.
 - Bookmark navigation, selectable/copyable text where the PDF contains a text layer, and page labels in the viewer.
 - Current-page rotation and deletion, arbitrary page reordering, crop-box adjustment, insert/replace/extract page operations, splitting into one-page PDFs, and merging PDFs.
-- Sticky-note annotations, form field inspection/filling, and plain-text export.
+- Comment workspace tools for text boxes, sticky notes, highlight, underline, strikethrough, freehand pen, lines, arrows, rectangles, and ellipses. Select a tool, then click or drag on the page; press Esc to exit the active tool. These are PDF annotations and remain undoable until saved.
+- Form field inspection/filling and plain-text export.
 - Staged edits with disk-backed undo/redo. Ctrl+S writes edits back to the same PDF; Save/Discard/Cancel is offered when closing a dirty document. Separate exports such as merge, split, extract, and text export ask for output paths.
 - Password-protected source PDFs can be opened with a password; supported edit operations preserve encryption using AES-256.
 
@@ -54,4 +55,4 @@ This application has not been legally reviewed. The build workflow includes libr
 
 ## Not implemented yet
 
-This is a growing local PDF editor, not a complete Acrobat replacement. Text/image object editing with font matching and reflow, broad markup tools (highlight, freehand, shapes, callouts, stamps, measurement), comments filtering/export, attachments/layers panels, regex and multi-file search, and full two-page spread are not implemented. The current forms work is basic field filling; a form designer, calculations, robust XFDF/FDF/CSV interchange, and advanced form widgets are not implemented. Office/HTML conversion, scanning, batch action wizard, OCR, signatures/certificate validation, true redaction and sanitization, PDF/A or PDF/X validation, accessibility tagging, preflight, and print-production workflows are also not implemented. These require dedicated implementations and validation; this build does not present them as completed features.
+This is a growing local PDF editor, not a complete Acrobat replacement. Text/image object editing with font matching and reflow, advanced callouts, stamps, measuring tools, comment filtering/export, attachments/layers panels, regex and multi-file search, and full two-page spread are not implemented. The Comment workspace supports common text and shape annotations, but it does not edit existing PDF text or provide Acrobat's full markup toolset. The current forms work is basic field filling; a form designer, calculations, robust XFDF/FDF/CSV interchange, and advanced form widgets are not implemented. Office/HTML conversion, scanning, batch action wizard, OCR, signatures/certificate validation, true redaction and sanitization, PDF/A or PDF/X validation, accessibility tagging, preflight, and print-production workflows are also not implemented. These require dedicated implementations and validation; this build does not present them as completed features.
