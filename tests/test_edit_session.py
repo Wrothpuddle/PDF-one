@@ -63,3 +63,22 @@ def test_staged_rotation_preserves_encryption(tmp_path: Path) -> None:
         assert reader.pages[0].get("/Rotate") == 90
     finally:
         session.cleanup()
+
+
+def test_sticky_note_is_staged_undoable_and_saved(tmp_path: Path) -> None:
+    source = tmp_path / "doc.pdf"
+    make_pdf(source)
+    session = EditSession(source)
+    try:
+        staged = session.add_sticky_note(0, "Review this section")
+        assert session.dirty
+        annotations = PdfReader(staged).pages[0]["/Annots"].get_object()
+        assert annotations[0].get_object()["/Subtype"] == "/Text"
+        assert annotations[0].get_object()["/Contents"] == "Review this section"
+        session.undo()
+        assert "/Annots" not in PdfReader(session.working_path).pages[0]
+        session.redo()
+        session.save()
+        assert PdfReader(source).pages[0]["/Annots"]
+    finally:
+        session.cleanup()
