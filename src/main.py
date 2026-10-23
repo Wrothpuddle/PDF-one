@@ -8,11 +8,11 @@ from pathlib import Path
 from offline_guard import install_offline_guard
 install_offline_guard()
 
-from pdf_operations import (extract_pages, extract_text_file, merge_pdfs, read_form_fields,
-                            split_pdf, protect_pdf)
+from pdf_operations import (add_pdf_annotation, extract_pages, extract_text_file,
+                            merge_pdfs, read_form_fields, split_pdf, protect_pdf)
 from edit_session import EditSession
 
-from PySide6.QtCore import Qt, QPointF, QSettings, QTimer
+from PySide6.QtCore import Qt, QPointF, QSettings, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
@@ -20,10 +20,138 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
     QLineEdit, QListView, QMainWindow, QMessageBox, QSpinBox, QTabWidget,
     QToolBar, QTreeView, QWidget, QHBoxLayout, QVBoxLayout, QTabBar,
-    QToolButton, QScrollArea, QFrame,
+    QToolButton, QScrollArea, QFrame, QRubberBand,
 )
 
 APP_NAME = "Northstar PDF"
+
+
+class InteractivePdfView(QPdfView):
+    """PDF view with mouse-wheel zoom, middle-button panning, and annotation gestures."""
+
+    annotationGesture = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.annotation_tool: str | None = None
+        self._pan_point = None
+        self._pan_h = 0
+        self._pan_v = 0
+        self._draw_start = None
+        self._draw_points: list[tuple[float, float]] = []
+        self._draw_page = 0
+        self._draw_location = QPointF()
+        self._draw_zoom = 1.0
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+
+    def set_annotation_tool(self, tool: str | None) -> None:
+        self.annotation_tool = tool
+        self.setCursor(Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
+
+    def wheelEvent(self, event) -> None:
+        """Use the wheel to zoom around the pointer; middle drag remains the pan gesture."""
+        delta = event.angleDelta().y()
+        nav = self.pageNavigator()
+        page = nav.currentPage()
+        if not delta or page < 0 or self.document() is None:
+            super().wheelEvent(event)
+            return
+        old_zoom = float(nav.currentZoom())
+        if old_zoom <= 0:
+            old_zoom = max(float(self.zoomFactor()), 0.1)
+        new_zoom = max(0.1, min(8.0, old_zoom * (1.18 ** (delta / 120.0))))
+        if abs(new_zoom - old_zoom) < 0.0001:
+            event.accept()
+            return
+        location = nav.currentLocation()
+        pointer = event.position()
+        new_location = QPointF(
+            location.x() + pointer.x() / old_zoom - pointer.x() / new_zoom,
+            location.y() + pointer.y() / old_zoom - pointer.y() / new_zoom,
+        )
+        nav.jump(page, new_location, new_zoom)
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_point = event.position().toPoint()
+            self._pan_h = self.horizontalScrollBar().value()
+            self._pan_v = self.verticalScrollBar().value()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool:
+            point = event.position().toPoint()
+            nav = self.pageNavigator()
+            self._draw_start = (float(point.x()), float(point.y()))
+            self._draw_points = [self._draw_start]
+            self._draw_page = max(0, nav.currentPage())
+            self._draw_location = QPointF(nav.currentLocation())
+            self._draw_zoom = max(float(nav.currentZoom()), 0.1)
+            self._rubber_band.setGeometry(point.x(), point.y(), 1, 1)
+            if self.annotation_tool != "note":
+                self._rubber_band.show()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        point = event.position().toPoint()
+        if self._pan_point is not None:
+            delta = point - self._pan_point
+            self.horizontalScrollBar().setValue(self._pan_h - delta.x())
+            self.verticalScrollBar().setValue(self._pan_v - delta.y())
+            event.accept()
+            return
+        if self._draw_start is not None:
+            raw = (float(point.x()), float(point.y()))
+            if self.annotation_tool == "pen":
+                previous = self._draw_points[-1]
+                if (raw[0] - previous[0]) ** 2 + (raw[1] - previous[1]) ** 2 >= 9:
+                    self._draw_points.append(raw)
+            left, top = self._draw_start
+            self._rubber_band.setGeometry(
+                int(min(left, raw[0])), int(min(top, raw[1])),
+                max(1, int(abs(raw[0] - left))), max(1, int(abs(raw[1] - top))),
+            )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton and self._pan_point is not None:
+            self._pan_point = None
+            self.setCursor(Qt.CursorShape.CrossCursor if self.annotation_tool else Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._draw_start is not None:
+            end = event.position().toPoint()
+            raw_end = (float(end.x()), float(end.y()))
+            if self.annotation_tool == "pen":
+                self._draw_points.append(raw_end)
+            self.annotationGesture.emit({
+                "kind": self.annotation_tool,
+                "page": self._draw_page,
+                "start": self._draw_start,
+                "end": raw_end,
+                "points": list(self._draw_points),
+                "location": QPointF(self._draw_location),
+                "zoom": self._draw_zoom,
+            })
+            self._rubber_band.hide()
+            self._draw_start = None
+            self._draw_points = []
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.annotation_tool:
+            self.set_annotation_tool(None)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class PdfTab(QWidget):
     def __init__(self, path: str, parent: QWidget | None = None) -> None:
@@ -34,7 +162,7 @@ class PdfTab(QWidget):
         self.bookmarks.setDocument(self.document)
         self.search = QPdfSearchModel(self)
         self.search.setDocument(self.document)
-        self.view = QPdfView(self)
+        self.view = InteractivePdfView(self)
         self.view.setDocument(self.document)
         self.view.setSearchModel(self.search)
         self.view.setPageMode(QPdfView.PageMode.MultiPage)
