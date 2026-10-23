@@ -277,11 +277,13 @@ class MainWindow(QMainWindow):
         tab = PdfTab(path, self.tabs)
         if tab.error:
             QMessageBox.warning(self, "Could not open PDF", f"{tab.error}\n\n{path}")
+            tab.cleanup()
             tab.deleteLater()
             return
         for i in range(self.tabs.count()):
             existing = self.tabs.widget(i)
             if isinstance(existing, PdfTab) and existing.path == tab.path:
+                tab.cleanup()
                 tab.deleteLater()
                 self.tabs.setCurrentIndex(i)
                 return
