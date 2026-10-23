@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from pypdf import PdfReader
 
 # Install the offline guard before loading any UI or PDF libraries.
 from offline_guard import install_offline_guard
@@ -11,6 +10,7 @@ install_offline_guard()
 
 from pdf_operations import (add_pdf_annotation, extract_pages, extract_text_file,
                             merge_pdfs, read_form_fields, split_pdf, protect_pdf)
+from pypdf import PdfReader
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPointF, QSettings, QTimer, Signal
@@ -998,7 +998,9 @@ class MainWindow(QMainWindow):
                 y2 = y1 + 3
             rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
             if kind == "text" and (abs(x2 - x1) < 24 or abs(y2 - y1) < 16):
-                rect = (rect[0], rect[1], rect[0] + 160, rect[1] + 42)
+                width = min(160.0, max(3.0, float(box.right) - rect[0]))
+                height = min(42.0, max(3.0, float(box.top) - rect[1]))
+                rect = (rect[0], rect[1], rect[0] + width, rect[1] + height)
         try:
             tab.edit_session.apply_operation(
                 add_pdf_annotation, page, kind, rect, text, points, password=tab.password
