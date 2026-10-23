@@ -8,7 +8,7 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 
 from pdf_operations import (crop_page, delete_page, extract_pages, insert_pages, merge_pdfs,
-                             replace_page, reorder_pages, rotate_page, split_pdf)
+                             replace_page, reorder_pages, rotate_page, split_pdf, protect_pdf)
 
 
 def make_pdf(path: Path, count: int = 3, password: str | None = None) -> None:
@@ -121,3 +121,25 @@ def test_reorder_and_crop_reject_invalid_inputs(tmp_path: Path) -> None:
         reorder_pages(source, tmp_path / "bad-order.pdf", [0, 0, 2])
     with pytest.raises(ValueError):
         crop_page(source, tmp_path / "bad-crop.pdf", 0, 50, 50, 20, 20)
+
+
+
+def test_password_protect_copy_uses_aes256_and_preserves_source(tmp_path: Path) -> None:
+    source, protected = tmp_path / "source.pdf", tmp_path / "protected.pdf"
+    make_pdf(source, 2)
+    protect_pdf(source, protected, "local-secret")
+    original = PdfReader(source)
+    secured = PdfReader(protected)
+    assert not original.is_encrypted
+    assert secured.is_encrypted
+    assert secured.decrypt("local-secret")
+    assert len(secured.pages) == 2
+
+
+def test_password_protect_rejects_empty_password_and_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    make_pdf(source)
+    with pytest.raises(ValueError, match="non-empty"):
+        protect_pdf(source, tmp_path / "protected.pdf", "  ")
+    with pytest.raises(ValueError, match="original remains unchanged"):
+        protect_pdf(source, source, "secret")
