@@ -1,6 +1,17 @@
 # Northstar PDF
 
-Northstar PDF is an original-brand, offline-first Windows PDF viewer. The current executable focuses on viewing and navigation: multiple tabs, continuous or single-page mode, fit-to-width/page zoom, page labels, bookmarks, text search with result highlighting, recent files, dark theme, and full screen. The Pages menu supports rotating or deleting the current page as an unsaved edit, adding a sticky-note annotation, extracting the current page, and merging PDFs into a new file. Rotations, deletions, and notes appear in the open document immediately, can be undone/redone, and are written back to the same PDF when you press Ctrl+S or choose Save when closing. Discard restores the original file. Extraction and merge create separate output PDFs. PDF text selection and copy are supplied by Qt PDF's viewer widget where supported.
+Northstar PDF is an original-brand, offline-first Windows PDF editor. It opens PDFs locally, has no sign-in or online-facing features, and stages supported edits in a temporary working copy until you save.
+
+## Available in the current build
+
+- Multiple document tabs, continuous or single-page view, fit-to-width/page and 100% zoom, page navigation, full screen, dark theme, recent files, and built-in text search.
+- Bookmark navigation, selectable/copyable text where the PDF contains a text layer, and page labels in the viewer.
+- Current-page rotation and deletion, arbitrary page reordering, crop-box adjustment, insert/replace/extract page operations, splitting into one-page PDFs, and merging PDFs.
+- Sticky-note annotations, form field inspection/filling, and plain-text export.
+- Staged edits with disk-backed undo/redo. Ctrl+S writes edits back to the same PDF; Save/Discard/Cancel is offered when closing a dirty document. Separate exports such as merge, split, extract, and text export ask for output paths.
+- Password-protected source PDFs can be opened with a password; supported edit operations preserve encryption using AES-256.
+
+The crop operation changes the visible crop box; underlying content outside the box remains in the PDF and can be revealed by changing the crop. It is not secure redaction. Rebuilding page sequences may not preserve every advanced PDF feature (for example, all document-level metadata, named destinations, or complex forms).
 
 ## Build and download
 
@@ -30,10 +41,11 @@ The program installs a Python audit hook before importing Qt. It rejects Python 
 - **PySide6 / Qt PDF**: Qt modules are available under LGPLv3, GPLv3, and/or commercial terms depending on module and distribution. Qt PDF uses PDFium internally. Review the exact license notices shipped with the wheel and meet applicable dynamic-linking/replacement and attribution obligations before redistributing the executable. The build artifact bundles Qt libraries in a one-file PyInstaller package; confirm the LGPL compliance model for this distribution before commercial release.
 - **PDFium**: BSD-style license with additional bundled third-party notices. Qt's PDF module includes attribution and license data; release packaging must retain it.
 - **pypdf**: BSD-3-Clause; include the license notice when redistributing.
+- **cryptography**: Apache-2.0 or BSD-3-Clause; include applicable notices when redistributing.
 - **PyInstaller**: GPL with a bootloader exception; include applicable notices.
 
 This application has not been legally reviewed. The build workflow includes library payloads in the executable, so do not sell or redistribute it until the Qt/PDFium/PyInstaller notice package and LGPL requirements have been verified for the exact versions.
 
-## Current scope
+## Not implemented yet
 
-This is a functional viewer MVP, not an Acrobat replacement. Page manipulation currently covers current-page rotate/delete/extract and PDF merge. Sticky-note comments are the first annotation tool. Reordering, crop, split, insert, annotations, OCR, forms, signatures, and conversion are not included yet. Search is literal (Qt PDF's built-in search model), not regex or cross-file search. Two-page spread view and page rotation are not included yet.
+This is a growing local PDF editor, not a complete Acrobat replacement. Text/image object editing with font matching and reflow, broad markup tools (highlight, freehand, shapes, callouts, stamps, measurement), comments filtering/export, attachments/layers panels, regex and multi-file search, and full two-page spread are not implemented. The current forms work is basic field filling; a form designer, calculations, robust XFDF/FDF/CSV interchange, and advanced form widgets are not implemented. Office/HTML conversion, scanning, batch action wizard, OCR, signatures/certificate validation, true redaction and sanitization, PDF/A or PDF/X validation, accessibility tagging, preflight, and print-production workflows are also not implemented. These require dedicated implementations and validation; this build does not present them as completed features.
