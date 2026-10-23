@@ -20,6 +20,11 @@ def _reader(path: str | Path, password: str | None = None) -> PdfReader:
     return reader
 
 
+def _require_new_output(source: str | Path, output: str | Path) -> None:
+    if Path(source).resolve() == Path(output).resolve():
+        raise ValueError("Choose a new output file so the original remains unchanged.")
+
+
 def _write(writer: PdfWriter, output: str | Path) -> None:
     output = Path(output)
     if output.suffix.lower() != ".pdf":
@@ -39,6 +44,7 @@ def rotate_page(source: str | Path, output: str | Path, page_index: int,
                 degrees: int = 90, password: str | None = None) -> None:
     if degrees not in (90, 180, 270):
         raise ValueError("Rotation must be 90, 180, or 270 degrees.")
+    _require_new_output(source, output)
     reader = _reader(source, password)
     if not 0 <= page_index < len(reader.pages):
         raise IndexError("Page index is outside the document.")
@@ -49,6 +55,7 @@ def rotate_page(source: str | Path, output: str | Path, page_index: int,
 
 def delete_page(source: str | Path, output: str | Path, page_index: int,
                 password: str | None = None) -> None:
+    _require_new_output(source, output)
     reader = _reader(source, password)
     if len(reader.pages) <= 1:
         raise ValueError("Cannot delete the only page in a PDF.")
@@ -63,6 +70,7 @@ def delete_page(source: str | Path, output: str | Path, page_index: int,
 
 def extract_pages(source: str | Path, output: str | Path, page_indices: list[int],
                   password: str | None = None) -> None:
+    _require_new_output(source, output)
     reader = _reader(source, password)
     if not page_indices:
         raise ValueError("Select at least one page to extract.")
@@ -77,6 +85,9 @@ def extract_pages(source: str | Path, output: str | Path, page_indices: list[int
 def merge_pdfs(sources: list[str | Path], output: str | Path) -> None:
     if len(sources) < 2:
         raise ValueError("Choose at least two PDFs to merge.")
+    output_resolved = Path(output).resolve()
+    if any(Path(source).resolve() == output_resolved for source in sources):
+        raise ValueError("Choose a new output file so the source PDFs remain unchanged.")
     writer = PdfWriter()
     for source in sources:
         reader = _reader(source)
