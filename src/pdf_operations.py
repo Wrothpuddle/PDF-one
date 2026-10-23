@@ -236,3 +236,15 @@ def merge_pdfs(sources: list[str | Path], output: str | Path) -> None:
         for page in reader.pages:
             writer.add_page(page)
     _write(writer, output)
+
+
+def protect_pdf(source: str | Path, output: str | Path, password: str,
+                source_password: str | None = None) -> None:
+    """Create an AES-256 password-protected copy without modifying the source."""
+    if not password or not password.strip():
+        raise ValueError("Choose a non-empty password.")
+    _require_new_output(source, output)
+    reader = _reader(source, source_password)
+    writer = PdfWriter(clone_from=reader)
+    writer.encrypt(password, password, algorithm="AES-256")
+    _write(writer, output)
