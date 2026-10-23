@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
+from pypdf.annotations import Text
 from pypdf.errors import PdfReadError
 
 
@@ -83,6 +84,26 @@ def extract_pages(source: str | Path, output: str | Path, page_indices: list[int
     for index in page_indices:
         writer.add_page(reader.pages[index])
     _write(writer, output, password if reader.is_encrypted else None)
+
+
+
+def add_sticky_note(source: str | Path, output: str | Path, page_index: int,
+                    text: str, password: str | None = None) -> None:
+    """Add a local PDF text-note annotation near the top-left of a page."""
+    if not text.strip():
+        raise ValueError("Note text cannot be empty.")
+    _require_new_output(source, output)
+    reader = _reader(source, password)
+    if not 0 <= page_index < len(reader.pages):
+        raise IndexError("Page index is outside the document.")
+    writer = PdfWriter(clone_from=reader)
+    box = writer.pages[page_index].mediabox
+    x = float(box.left) + 28
+    y = float(box.top) - 58
+    annotation = Text(rect=(x, y, x + 22, y + 22), text=text.strip())
+    writer.add_annotation(page_index, annotation)
+    _write(writer, output, password if reader.is_encrypted else None)
+
 
 
 def merge_pdfs(sources: list[str | Path], output: str | Path) -> None:
