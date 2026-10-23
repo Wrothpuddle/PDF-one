@@ -32,6 +32,7 @@ jobs:
           --name NorthstarPDF
           --collect-all PySide6.QtPdf
           --collect-all PySide6.QtPdfWidgets
+          --collect-all cryptography
           --hidden-import PySide6.QtPdf
           --hidden-import PySide6.QtPdfWidgets
           src/main.py
