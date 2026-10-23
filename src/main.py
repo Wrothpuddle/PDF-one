@@ -437,6 +437,7 @@ def self_test() -> int:
         print("PDFium malformed-file smoke test:", "PASS" if ok else f"FAIL ({result})")
         return 0 if ok else 1
     finally:
+        document.close()  # Release PDFium's file handle before deleting on Windows.
         os.unlink(name)
         app.quit()
 
