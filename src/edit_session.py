@@ -8,8 +8,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from pdf_operations import (add_sticky_note, crop_page, delete_page, insert_pages,
-                             reorder_pages, replace_page, rotate_page)
+from pdf_operations import (add_sticky_note, crop_page, delete_page, fill_form_fields,
+                             insert_pages, reorder_pages, replace_page, rotate_page)
 
 
 class EditSession:
@@ -85,6 +85,10 @@ class EditSession:
         self._states.append(output)
         self._cursor += 1
         return output
+
+    def fill_fields(self, values: dict[str, str],
+                    password: str | None = None) -> Path:
+        return self.apply_operation(fill_form_fields, values, password=password)
 
     def undo(self) -> Path:
         if not self.can_undo:
