@@ -8,7 +8,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from pdf_operations import add_sticky_note, delete_page, rotate_page
+from pdf_operations import (add_sticky_note, crop_page, delete_page, insert_pages,
+                             reorder_pages, replace_page, rotate_page)
 
 
 class EditSession:
@@ -33,6 +34,31 @@ class EditSession:
     @property
     def can_redo(self) -> bool:
         return self._cursor < len(self._states) - 1
+
+    def apply_operation(self, operation, *args, **kwargs) -> Path:
+        """Run a page edit against the current revision and add it to undo history."""
+        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
+        operation(self.working_path, output, *args, **kwargs)
+        self._states = self._states[: self._cursor + 1]
+        self._states.append(output)
+        self._cursor += 1
+        return output
+
+    def reorder(self, order: list[int], password: str | None = None) -> Path:
+        return self.apply_operation(reorder_pages, order, password=password)
+
+    def crop(self, page_index: int, left: float, bottom: float, right: float,
+             top: float, password: str | None = None) -> Path:
+        return self.apply_operation(crop_page, page_index, left, bottom, right, top,
+                                    password=password)
+
+    def insert(self, source: str | Path, before_page: int,
+               password: str | None = None) -> Path:
+        return self.apply_operation(insert_pages, source, before_page, password=password)
+
+    def replace(self, source: str | Path, page_index: int,
+                password: str | None = None) -> Path:
+        return self.apply_operation(replace_page, source, page_index, password=password)
 
     def rotate(self, page_index: int, degrees: int = 90,
                password: str | None = None) -> Path:
