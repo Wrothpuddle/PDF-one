@@ -9,7 +9,8 @@ from offline_guard import install_offline_guard
 install_offline_guard()
 
 from pdf_operations import (add_pdf_annotation, extract_pages, extract_text_file,
-                            merge_pdfs, read_form_fields, split_pdf, protect_pdf)
+                            merge_pdfs, read_form_fields, split_pdf, protect_pdf,
+                            replace_existing_text)
 from pypdf import PdfReader
 from edit_session import EditSession
 
@@ -458,6 +459,8 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         fill_action = tools_menu.addAction("Fill form fields…")
         fill_action.triggered.connect(self._fill_form_fields)
+        replace_text_action = tools_menu.addAction("Edit existing text…")
+        replace_text_action.triggered.connect(self._edit_existing_text)
         export_text_action = tools_menu.addAction("Export text…")
         export_text_action.triggered.connect(self._export_text)
         comment_menu = self.menuBar().addMenu("&Comment")
@@ -500,7 +503,8 @@ class MainWindow(QMainWindow):
             "Reorder pages": reorder_action, "Crop page": crop_action,
             "Insert pages": insert_action, "Replace page": replace_action,
             "Split PDF": split_action, "Merge PDFs": merge_action,
-            "Fill form": fill_action, "Export text": export_text_action,
+            "Fill form": fill_action, "Edit existing text": replace_text_action,
+            "Export text": export_text_action,
             "Protect copy": protect_action,
             **annotation_actions,
             "Find text": self.find_action, "Previous match": self.previous_result,
@@ -947,6 +951,34 @@ class MainWindow(QMainWindow):
             self._set_tab_modified(tab)
         except Exception as exc:
             QMessageBox.warning(self, "Could not fill form", str(exc))
+
+    def _edit_existing_text(self) -> None:
+        """Replace exact page text using redaction, staged in the per-tab undo history."""
+        tab = self._active()
+        if not tab:
+            return
+        page = max(0, tab.view.pageNavigator().currentPage())
+        old_text, accepted = QInputDialog.getText(
+            self, "Edit existing text", "Exact text to find on the current page:"
+        )
+        if not accepted or not old_text:
+            return
+        new_text, accepted = QInputDialog.getText(
+            self, "Edit existing text", "Replacement text (leave empty to remove it):"
+        )
+        if not accepted:
+            return
+        try:
+            tab.edit_session.apply_operation(
+                replace_existing_text, page, old_text, new_text, password=tab.password
+            )
+            tab._reload_working_copy(page)
+            self._set_tab_modified(tab)
+            self.statusBar().showMessage(
+                "Text replacement staged · Ctrl+Z to undo · Ctrl+S to save", 6000
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not edit text", str(exc))
 
     def _export_text(self) -> None:
         tab = self._active()
