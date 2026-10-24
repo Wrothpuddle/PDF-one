@@ -1289,6 +1289,101 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Could not export text", str(exc))
 
+    def _update_tool_indicator(self, tool: str) -> None:
+        labels = {
+            "select": "Select", "text": "Text Box", "note": "Sticky Note",
+            "highlight": "Highlight", "underline": "Underline",
+            "strikeout": "Strikethrough", "pen": "Pen", "line": "Line",
+            "arrow": "Arrow", "rectangle": "Rectangle", "ellipse": "Ellipse",
+        }
+        detail = " · Text Box" if self._selected_text_box is not None and tool == "select" else ""
+        if hasattr(self, "active_tool_indicator"):
+            self.active_tool_indicator.setText(f"TOOL  {labels.get(tool, tool.title())}{detail}")
+            self.active_tool_indicator.setToolTip(
+                f"Current tool: {labels.get(tool, tool.title())}{detail}"
+            )
+
+    @staticmethod
+    def _pdf_rect_to_view(tab: PdfTab, page_index: int, rect: tuple,
+                          location: QPointF, zoom: float, page_box) -> QRect:
+        page_size = tab.document.pagePointSize(page_index)
+        x_margin = max(0.0, (tab.view.viewport().width()
+                             - float(page_size.width()) * zoom) / 2.0)
+        left = x_margin + (float(rect[0]) - float(page_box.left) - location.x()) * zoom
+        right = x_margin + (float(rect[2]) - float(page_box.left) - location.x()) * zoom
+        top = (float(page_box.top) - float(rect[3]) - location.y()) * zoom
+        bottom = (float(page_box.top) - float(rect[1]) - location.y()) * zoom
+        return QRect(round(left), round(top), max(2, round(right - left)),
+                     max(2, round(bottom - top)))
+
+    def _handle_selection_gesture(self, tab: PdfTab, gesture: dict) -> None:
+        if self.tabs.indexOf(tab) < 0 or self._text_editor is not None:
+            return
+        page_index = int(gesture["page"])
+        start, end = gesture["start"], gesture["end"]
+        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
+        if reader.is_encrypted and tab.password:
+            reader.decrypt(tab.password)
+        if not 0 <= page_index < len(reader.pages):
+            return
+        page_box = reader.pages[page_index].mediabox
+        start_pdf = self._viewport_to_pdf(
+            tab, page_index, start, gesture["location"], gesture["zoom"], page_box
+        )
+        end_pdf = self._viewport_to_pdf(
+            tab, page_index, end, gesture["location"], gesture["zoom"], page_box
+        )
+        operations = tab.edit_session.operations
+        hit = None
+        for state_index in range(tab.edit_session.cursor, 0, -1):
+            record = operations[state_index]
+            if not record or record[0] is not add_rich_text_box:
+                continue
+            args = record[1]
+            if int(args[0]) != page_index:
+                continue
+            rect = tuple(float(value) for value in args[1])
+            if rect[0] <= start_pdf[0] <= rect[2] and rect[1] <= start_pdf[1] <= rect[3]:
+                hit = (state_index, page_index, rect, args)
+                break
+        if hit is None:
+            self._selected_text_box = None
+            tab.view.show_selected_object(None)
+            self._update_tool_indicator(tab.view.annotation_tool)
+            return
+
+        state_index, page_index, rect, args = hit
+        self._selected_text_box = (tab, state_index, page_index, rect)
+        dx, dy = end_pdf[0] - start_pdf[0], end_pdf[1] - start_pdf[1]
+        if abs(dx) > 1.5 or abs(dy) > 1.5:
+            width, height = rect[2] - rect[0], rect[3] - rect[1]
+            dx = max(float(page_box.left) - rect[0],
+                     min(float(page_box.right) - rect[2], dx))
+            dy = max(float(page_box.bottom) - rect[1],
+                     min(float(page_box.top) - rect[3], dy))
+            moved_rect = (rect[0] + dx, rect[1] + dy,
+                          rect[0] + dx + width, rect[1] + dy + height)
+            new_args = (args[0], moved_rect, *args[2:])
+            try:
+                tab.edit_session.replace_operation(
+                    state_index, add_rich_text_box, *new_args, **record[2]
+                )
+                rect = moved_rect
+                self._selected_text_box = (tab, state_index, page_index, rect)
+                tab._reload_working_copy(page_index)
+                self._set_tab_modified(tab)
+                self.statusBar().showMessage(
+                    "Text box moved · Ctrl+Z to undo · Ctrl+S to save", 4500
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Could not move text box", str(exc))
+                return
+        screen_rect = self._pdf_rect_to_view(
+            tab, page_index, rect, gesture["location"], gesture["zoom"], page_box
+        )
+        tab.view.show_selected_object(screen_rect)
+        self._update_tool_indicator("select")
+
     def _activate_annotation_tool(self, kind: str) -> None:
         tab = self._active()
         if not tab:
