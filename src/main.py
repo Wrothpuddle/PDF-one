@@ -1828,10 +1828,10 @@ def self_test() -> int:
         app.processEvents()
         organize_index = next(
             i for i in range(window.workspace_tabs.count())
-            if window.workspace_tabs.tabText(i) == "Organize"
+            if window.workspace_tabs.tabText(i) == "Document"
         )
         window.workspace_tabs.setCurrentIndex(organize_index)
-        ui_ok = (window.tool_dock.windowTitle() == "Tools · Organize"
+        ui_ok = (window.tool_dock.windowTitle() == "Tool Chest · Document"
                  and window.tool_dock.isFloating() is False)
 
         view = window._active().view
@@ -1930,12 +1930,33 @@ def self_test() -> int:
             Qt.KeyboardModifier.NoModifier,
         ))
         app.processEvents()
+        state_index = text_tab.edit_session.cursor
+        record = text_tab.edit_session.operations[state_index]
+        original_rect = tuple(record[1][1])
+        nav = text_tab.view.pageNavigator()
+        view_location = QPointF(nav.currentLocation())
+        view_zoom = max(float(nav.currentZoom()), 0.1)
+        reader_for_move = PdfReader(str(text_tab.edit_session.working_path), strict=False)
+        page_box_for_move = reader_for_move.pages[gesture["page"]].mediabox
+        box_screen = window._pdf_rect_to_view(
+            text_tab, gesture["page"], original_rect, view_location, view_zoom,
+            page_box_for_move,
+        )
+        press = (float(box_screen.left() + 8), float(box_screen.top() + 8))
+        drag = (press[0] + 18, press[1] + 12)
+        window._handle_selection_gesture(text_tab, {
+            "page": gesture["page"], "start": press, "end": drag,
+            "location": view_location, "zoom": view_zoom,
+        })
+        moved_record = text_tab.edit_session.operations[state_index]
+        move_ok = tuple(moved_record[1][1]) != original_rect
         placed_reader = PdfReader(str(text_tab.edit_session.working_path), strict=False)
         extracted = placed_reader.pages[gesture["page"]].extract_text() or ""
-        placed_text = "Visible preview" in extracted and "second line" in extracted
+        placed_text = ("Visible preview" in extracted and "second line" in extracted
+                       and move_ok)
         text_tab.view.set_annotation_tool("text")
         window._escape_to_pointer()
-        escape_ok = text_tab.view.annotation_tool is None
+        escape_ok = text_tab.view.annotation_tool == "select"
         text_box_ok = preview_ok and resize_ok and placed_text and escape_ok
         text_tab.discard_edits()
         window.close()
@@ -1947,7 +1968,7 @@ def self_test() -> int:
         print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
         print("Panning with fit-to-page scrollbars disabled:",
               "PASS" if fit_pan_ok else "FAIL")
-        print("Enter places; Ctrl+Enter adds a line; Escape restores pointer:",
+        print("Select moves text; Enter/Ctrl+Enter/Escape controls:",
               "PASS" if text_box_ok else "FAIL")
         return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok and text_box_ok else 1
     finally:
