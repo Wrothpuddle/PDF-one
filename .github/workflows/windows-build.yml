@@ -33,6 +33,8 @@ jobs:
           --collect-all PySide6.QtPdf
           --collect-all PySide6.QtPdfWidgets
           --collect-all cryptography
+          --collect-all pymupdf
+          --hidden-import fitz
           --hidden-import PySide6.QtPdf
           --hidden-import PySide6.QtPdfWidgets
           src/main.py
