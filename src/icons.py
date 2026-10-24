@@ -210,6 +210,20 @@ def _draw(name: str, p: QPainter, fg: QColor) -> None:
         p.drawRoundedRect(QRectF(-10, -3.5, 11, 7), 3.5, 3.5)
         p.drawRoundedRect(QRectF(-1, -3.5, 11, 7), 3.5, 3.5)
         p.restore()
+    elif name == "volume":
+        p.setPen(_pen(QColor("#9c36b5"), 1.6))
+        p.setBrush(QColor(156, 54, 181, 60))
+        p.drawPolygon(_poly((4, 9), (14, 9), (14, 20), (4, 20)))
+        p.drawPolygon(_poly((4, 9), (9, 4), (19, 4), (14, 9)))
+        p.drawPolygon(_poly((14, 9), (19, 4), (19, 15), (14, 20)))
+    elif name == "image":
+        p.setPen(_pen(fg, 1.4))
+        p.drawRect(QRectF(3, 5, 18, 14))
+        p.setBrush(QColor("#f5c400"))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(8, 9.5), 2, 2)
+        p.setBrush(GREEN)
+        p.drawPolygon(_poly((4, 18), (10, 11), (14, 15), (16, 13), (20, 18)))
     elif name == "lock":
         p.drawRoundedRect(QRectF(5, 11, 14, 10), 2, 2)
         p.drawArc(QRectF(8, 4, 8, 12), 0, 180 * 16)
@@ -267,5 +281,5 @@ ICON_NAMES = ["select", "pan", "text_select", "zoom_area", "zoom_in", "zoom_out"
               "fit_page", "prev_page", "next_page", "crop", "snapshot", "calibrate", "redact",
               "text", "callout", "note", "highlight", "underline", "strikeout", "pen",
               "highlighter", "line", "arrow", "polyline", "polygon", "cloud", "rectangle",
-              "ellipse", "stamp", "link", "length", "polylength", "area", "perimeter", "count", "angle",
+              "ellipse", "stamp", "image", "link", "volume", "length", "polylength", "area", "perimeter", "count", "angle",
               "lock", "snap", "undo", "redo", "open", "save", "print"]

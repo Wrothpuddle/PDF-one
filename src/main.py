@@ -50,8 +50,8 @@ SOURCE_URL = "https://github.com/Wrothpuddle/PDF-one"
 
 MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout",
                 "pen", "highlighter", "line", "arrow", "polyline", "polygon", "cloud",
-                "rectangle", "ellipse", "stamp"]
-MEASURE_TOOLS = ["length", "polylength", "area", "perimeter", "count", "angle"]
+                "rectangle", "ellipse", "stamp", "image"]
+MEASURE_TOOLS = ["length", "polylength", "area", "volume", "perimeter", "count", "angle"]
 NAV_TOOLS = {"select": "Select", "pan": "Pan", "text_select": "Select Text",
              "zoom_area": "Zoom Area", "crop": "Crop", "snapshot": "Snapshot",
              "calibrate": "Calibrate", "redact": "Redact", "link": "Link"}
@@ -1077,6 +1077,14 @@ class MainWindow(QMainWindow):
         if kind not in KIND_LABELS:
             return
         style = Style.from_dict(self.style_for(kind).to_dict())
+        if kind == "image" and not (style.image and Path(style.image).is_file()):
+            picture, _ = QFileDialog.getOpenFileName(
+                self, "Choose a picture for the image stamp", self._last_dir(),
+                "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff)")
+            if not picture:
+                return
+            style.image = picture
+            self.style_for("image").image = picture  # reuse it for the next placement
         if kind == "note" and not text:
             text, accepted = QInputDialog.getMultiLineText(self, "Note", "Note text:")
             if not accepted:

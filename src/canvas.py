@@ -1127,7 +1127,7 @@ class PdfCanvas(QGraphicsView):
             self._open_editor(index, "text", [box.tl, box.br],
                               local.translated(item.pos()))
             return
-        if not moved and kind != "stamp":
+        if not moved and kind not in ("stamp", "image"):
             return
         self.createRequested.emit(kind, index, [start_page, end], "")
 

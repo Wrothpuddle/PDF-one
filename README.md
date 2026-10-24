@@ -7,7 +7,7 @@ Northstar PDF is an offline Windows PDF markup, measurement, and review app mode
 ### Live markups
 Every markup is a real PDF annotation. It stays selectable and editable after saving, and other PDF viewers (Acrobat, Bluebeam, browsers) show it the same way.
 
-- **Tools:** Text Box, Callout, Note, Highlight / Underline / Strikethrough (these snap to the words under the drag), Pen, Highlighter, Line, Arrow, Polyline, Polygon, Cloud, Rectangle, Ellipse, Stamps (Approved, Draft, For Comment, and more), and Redaction.
+- **Tools:** Text Box, Callout, Note, Highlight / Underline / Strikethrough (these snap to the words under the drag), Pen, Highlighter, Line, Arrow, Polyline, Polygon, Cloud, Rectangle, Ellipse, Stamps (Approved, Draft, For Comment, and more), Image stamps (place a signature or logo picture; save it as a Tool Chest tool to reuse it), and Redaction.
 - **Select tool:** click to select (Shift/Ctrl adds to the selection), drag a box to select several markups, drag to move, drag corner handles to resize, and drag vertex handles to reshape lines, polylines, polygons, and clouds. Arrow keys nudge (Shift moves 10 pt). Delete removes markups, Ctrl+D duplicates, Ctrl+C / Ctrl+V copy and paste (also between documents), and F2 or a double-click edits text.
 - **Tool Lock** (Ctrl+L) keeps a tool active after each use; otherwise the app returns to Select and selects the new markup. Hold **Shift** or turn on **Ortho** (F8) to snap lines to 45° steps.
 
@@ -25,7 +25,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 
 ### Measurement
 - **Scales are set per page.** Choose a standard scale (1/8" = 1'-0", 1/4" = 1'-0", 1" = 20', 1:100, …), enter a custom ratio, or use **Calibrate**: drag along a known dimension and type its real length (12'-6" style input is accepted). A scale can be applied to one page or every page.
-- **Tools:** Length, Polylength, Area, Perimeter, Count, and Angle.
+- **Tools:** Length, Polylength, Area, Volume (area × a depth set in Properties; shows cubic yards too for feet), Perimeter, Count, and Angle.
 - **Snap to Content** (F9, on by default) moves measurement and markup points onto line endpoints, midpoints, intersections, and existing markup vertices, with a marker showing what it snapped to. Hold Shift to place a point freely or snap to 45°.
 - **Updating and display:** values follow the page scale and recalculate when a measurement is moved or reshaped. Values display in feet-inches (to 1/16"), feet, inches, millimetres, centimetres, or metres. Length measurements show their value on the line in any PDF viewer; other measurements are labelled on the page in Northstar and store their value in the markup's comment.
 
@@ -108,6 +108,6 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 
 - **Document content:** OCR of scanned pages; digital signatures and certificate validation; Office and image conversion.
 - **Multi-file and collaboration:** batch processing across many files, Sets (multi-file drawing packages), and real-time collaboration (left out on purpose to keep the app offline).
-- **Measurement:** volume measurements, and separate scales for viewports within a page.
+- **Measurement:** separate scales for viewports within a page, and area cutouts.
 - **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.
 - **Standards:** PDF/A and PDF/X validation, and accessibility tagging.

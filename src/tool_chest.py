@@ -54,7 +54,7 @@ def builtin_sets() -> dict[str, list[ToolPreset]]:
                     and kind not in ("stamp", "redact")]
     return {
         "Markup": [_preset(kind) for kind in markup_kinds],
-        "Measure": [_preset(kind) for kind in ("length", "polylength", "area", "perimeter",
+        "Measure": [_preset(kind) for kind in ("length", "polylength", "area", "volume", "perimeter",
                                                "count", "angle")],
         "Construction Review": [
             _preset("cloud", "Revision Cloud", stroke="#e02020", width=1.5, subject="Revision"),
@@ -67,6 +67,7 @@ def builtin_sets() -> dict[str, list[ToolPreset]]:
             _preset("count", "Count: Outlet", subject="Outlet"),
             _preset("count", "Count: Fixture", stroke="#1f6feb", fill="#1f6feb", subject="Fixture"),
             _preset("area", "Area: Flooring", stroke="#2c9f2c", fill="#2c9f2c", subject="Flooring"),
+            _preset("volume", "Volume: 4\" Slab", depth=4 / 12, subject="Concrete slab"),
         ],
         "Stamps": [_preset("stamp", name, stamp=name, subject=f"Stamp: {name}") for name in STAMPS],
         "Redaction": [_preset("redact")],

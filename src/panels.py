@@ -118,6 +118,10 @@ class PropertiesPanel(QWidget):
         format_row.addStretch(1)
         self.stamp = QComboBox()
         self.stamp.addItems(STAMPS)
+        self.depth = QDoubleSpinBox()
+        self.depth.setRange(0, 100000)
+        self.depth.setDecimals(3)
+        self.depth.setToolTip("Depth in the page scale's unit (feet for feet-inch scales)")
         self.comment = QPlainTextEdit()
         self.comment.setPlaceholderText("Comment")
         self.comment.setMaximumHeight(90)
@@ -140,7 +144,8 @@ class PropertiesPanel(QWidget):
                               ("Font", self.font), ("Format", format_row),
                               ("Font size", self.font_size),
                               ("Text colour", self.text_color), ("Align", self.align),
-                              ("Stamp", self.stamp), ("Status", self.status),
+                              ("Stamp", self.stamp), ("Depth", self.depth),
+                              ("Status", self.status),
                               ("Measurement", self.measurement)):
             form.addRow(label, widget)
             self.rows[label] = form.rowCount() - 1
@@ -164,6 +169,7 @@ class PropertiesPanel(QWidget):
         self.text_color.changed.connect(self._emit_style)
         self.width.editingFinished.connect(self._emit_style)
         self.font_size.editingFinished.connect(self._emit_style)
+        self.depth.editingFinished.connect(self._emit_style)
         self.opacity.valueChanged.connect(lambda v: self.opacity_label.setText(f"{v}%"))
         self.opacity.sliderReleased.connect(self._emit_style)
         for combo in (self.dash, self.line_start, self.line_end, self.font, self.align, self.stamp):
@@ -193,17 +199,19 @@ class PropertiesPanel(QWidget):
         self.heading.setText(heading)
         text_kind = kind in ("text", "callout")
         lines = kind in ("line", "arrow", "polyline", "length", "polylength", "callout")
-        shapes = kind not in ("note", "stamp", "highlight", "underline", "strikeout", "squiggly")
+        shapes = kind not in ("note", "stamp", "image", "highlight", "underline", "strikeout",
+                              "squiggly")
         visible = {
-            "Subject": True, "Line colour": kind != "stamp",
+            "Subject": True, "Line colour": kind not in ("stamp", "image"),
             "Fill": kind in ("text", "callout", "rectangle", "ellipse", "polygon", "cloud",
-                             "area", "count", "redact"),
+                             "area", "volume", "count", "redact"),
             "Line width": shapes and kind != "count",
             "Opacity": True, "Line style": shapes and kind not in ("count", "pen", "highlighter"),
             "Start": lines and kind != "callout", "End": lines,
             "Font": text_kind, "Format": text_kind, "Font size": text_kind,
             "Text colour": text_kind,
-            "Align": text_kind, "Stamp": kind == "stamp", "Status": status is not None,
+            "Align": text_kind, "Stamp": kind == "stamp", "Depth": kind == "volume",
+            "Status": status is not None,
             "Measurement": bool(measurement),
         }
         for label, show in visible.items():
@@ -226,6 +234,8 @@ class PropertiesPanel(QWidget):
         self.italic.setChecked(style.italic)
         self.underline.setChecked(style.underline)
         self.stamp.setCurrentText(style.stamp)
+        self.depth.setValue(style.depth)
+        self._image = style.image
         self.comment.setEnabled(comment is not None)
         self.comment.setPlainText(comment or "")
         self.status.setCurrentText(status or "")
@@ -243,6 +253,7 @@ class PropertiesPanel(QWidget):
                      underline=self.underline.isChecked(),
                      line_start=self.line_start.currentText(),
                      line_end=self.line_end.currentText(), stamp=self.stamp.currentText(),
+                     depth=self.depth.value(), image=getattr(self, "_image", ""),
                      subject=self.subject.text().strip())
 
     def _emit_style(self, *_args) -> None:
@@ -352,20 +363,8 @@ class MarkupsList(QWidget):
                 self.table.setItem(number, column, item)
         self.table.setSortingEnabled(True)
         self._apply_filter()
-        totals = markups.measurement_totals(rows)
-        parts = []
-        for subject, (value, count) in sorted(totals.items()):
-            sample = next(r for r in rows if (r["subject"] or r["type"]) == subject and
-                          r["value"] is not None)
-            if sample["kind"] == "count":
-                parts.append(f"{subject}: {count}")
-            elif sample["kind"] == "angle":
-                continue
-            else:
-                unit = sample["measurement"].split(" ", 1)[1] if " " in sample["measurement"] \
-                    and not sample["measurement"].endswith('"') else ""
-                shown = f"{value:.2f} {unit}".strip() if unit else f"{value:.2f}"
-                parts.append(f"{subject}: {shown} ({count})")
+        parts = [f"{subject}: {total}" + (f" ({count})" if total != str(count) else "")
+                 for subject, total, count in markups.measurement_summary(rows)]
         self.totals.setText("Totals — " + " · ".join(parts) if parts else "")
         self._updating = False
 

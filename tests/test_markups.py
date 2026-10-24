@@ -255,3 +255,33 @@ def test_rich_text_box_formatting_round_trips(session: PdfSession) -> None:
     style.bold = False
     session.apply("Unbold", lambda doc: markups.apply_style(doc[0], xref, style))
     assert not markups.read_style(session.doc[0], xref).bold
+
+
+def test_volume_and_image_stamps(session: PdfSession, tmp_path: Path) -> None:
+    scale = markups.common_scale('1/4" = 1\'-0"')
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], scale))
+    style = default_style("volume")
+    style.depth = 0.5
+    volume = session.apply("Volume", lambda doc: create_markup(
+        doc[0], "volume", [(100, 100), (136, 100), (136, 136), (100, 136)], style))
+    value, label = markups.measurement(session.doc[0], volume)
+    assert value == pytest.approx(2.0) and label.startswith("2.00 cu ft")
+    rows = markups.list_markups(session.doc)
+    assert markups.measurement_summary(rows) == [("Volume", markups.format_volume(2.0, "ft"), 1)]
+
+    picture = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 30), False)
+    picture.set_rect(picture.irect, (200, 0, 0))
+    path = tmp_path / "signature.png"
+    path.write_bytes(picture.tobytes("png"))
+    image_style = default_style("image")
+    image_style.image = str(path)
+    stamp = session.apply("Image", lambda doc: create_markup(
+        doc[0], "image", [(300, 300), (300, 300)], image_style))
+    page = session.doc[0]
+    assert tuple(page.load_annot(stamp).rect) == pytest.approx((300, 300, 450, 375))
+    copy = session.apply("Copy", lambda doc: markups.duplicate_markup(doc[0], stamp, target=doc[1]))
+    page = session.doc[1]
+    samples = page.get_pixmap(clip=page.load_annot(copy).rect).samples
+    assert sum(1 for i in range(0, len(samples), 3) if samples[i] > 150 and samples[i + 1] < 60) > 1000
+    with pytest.raises(ValueError):
+        create_markup(session.doc[0], "image", [(10, 10)], default_style("image"))

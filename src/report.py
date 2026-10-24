@@ -46,22 +46,11 @@ def build_html(title: str, rows: list[dict]) -> str:
         parts.append(f"<tr><td>{_cell(t[0])}</td><td class='num'>{t[1]}</td>"
                      f"<td>{_cell(s[0])}</td><td class='num'>{s[1]}</td></tr>")
     parts.append("</table>")
-    totals = markups.measurement_totals(rows)
+    totals = markups.measurement_summary(rows)
     if totals:
         parts.append("<h2>Measurement totals</h2><table><tr><th>Subject</th><th>Total</th>"
                      "<th>Count</th></tr>")
-        for subject, (value, count) in sorted(totals.items()):
-            sample = next(r for r in rows if (r["subject"] or r["type"]) == subject
-                          and r["value"] is not None)
-            if sample["kind"] == "count":
-                total = str(count)
-            elif sample["kind"] == "angle":
-                total = "—"
-            elif sample["measurement"].endswith('"'):
-                total = markups.format_length(value, "ft-in")
-            else:
-                unit = sample["measurement"].split(" ", 1)[1] if " " in sample["measurement"] else ""
-                total = f"{value:.2f} {unit}".strip()
+        for subject, total, count in totals:
             parts.append(f"<tr><td>{_cell(subject)}</td><td>{_cell(total)}</td>"
                          f"<td class='num'>{count}</td></tr>")
         parts.append("</table>")

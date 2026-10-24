@@ -26,9 +26,12 @@ import re
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 
+from pathlib import Path
+
 import pymupdf as fitz
 
 KIND_KEY = "NSKind"
+DEPTH_KEY = "NSDepth"
 STATUS_KEY = "NSStatus"
 SCALE_KEY = "NSScale"
 
@@ -41,19 +44,21 @@ KIND_LABELS = {
     "cloud": "Cloud", "rectangle": "Rectangle", "ellipse": "Ellipse",
     "stamp": "Stamp", "redact": "Redaction",
     "length": "Length", "polylength": "Polylength", "area": "Area",
-    "perimeter": "Perimeter", "count": "Count", "angle": "Angle",
+    "perimeter": "Perimeter", "count": "Count", "angle": "Angle", "volume": "Volume",
+    "image": "Image",
 }
 
 # How each kind is drawn: by dragging a box, dragging two points, clicking a
 # series of points (double-click/Enter to finish), freehand, or one click.
-DRAG_RECT = {"text", "rectangle", "ellipse", "stamp", "redact",
+DRAG_RECT = {"text", "rectangle", "ellipse", "stamp", "image", "redact",
              "highlight", "underline", "strikeout", "squiggly"}
 DRAG_LINE = {"line", "arrow", "length", "callout"}
-CLICK_POINTS = {"polyline", "polygon", "cloud", "polylength", "area", "perimeter", "angle"}
+CLICK_POINTS = {"polyline", "polygon", "cloud", "polylength", "area", "perimeter", "angle",
+                "volume"}
 FREEHAND = {"pen", "highlighter"}
 SINGLE_CLICK = {"note", "count"}
-MEASURE_KINDS = {"length", "polylength", "area", "perimeter", "count", "angle"}
-CLOSED_KINDS = {"polygon", "cloud", "area", "perimeter"}
+MEASURE_KINDS = {"length", "polylength", "area", "perimeter", "count", "angle", "volume"}
+CLOSED_KINDS = {"polygon", "cloud", "area", "perimeter", "volume"}
 TEXT_MARKUP_KINDS = {"highlight", "underline", "strikeout", "squiggly"}
 
 STAMPS = ["Approved", "AsIs", "Confidential", "Departmental", "Experimental", "Expired",
@@ -104,6 +109,8 @@ class Style:
     line_end: str = "none"
     stamp: str = "Approved"
     subject: str = ""
+    depth: float = 1.0   # volume measurements, in the page scale's unit
+    image: str = ""      # image stamps: picture file used when placing
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -140,6 +147,8 @@ def default_style(kind: str) -> Style:
             style.line_start = style.line_end = "butt"
         if kind == "area":
             style.fill, style.opacity = "#1f6feb", 0.35
+        if kind == "volume":
+            style.stroke, style.fill, style.opacity = "#9c36b5", "#9c36b5", 0.3
         if kind == "count":
             style.stroke = style.fill = "#e02020"
     return style
@@ -309,8 +318,11 @@ def _normalized_rect(points, minimum: float = 4.0) -> fitz.Rect:
 
 
 def create_markup(page: fitz.Page, kind: str, points, style: Style | None = None,
-                  text: str = "", author: str = "") -> int:
-    """Add a markup to page and return its xref. points are unrotated page coords."""
+                  text: str = "", author: str = "", image: bytes | None = None) -> int:
+    """Add a markup to page and return its xref. points are unrotated page coords.
+
+    Image stamps take the picture from ``image`` bytes or the ``style.image`` file.
+    """
     style = style or default_style(kind)
     points = [fitz.Point(point) for point in points]
     if not points:
@@ -385,6 +397,21 @@ def create_markup(page: fitz.Page, kind: str, points, style: Style | None = None
             rect = fitz.Rect(rect.x0, rect.y0, rect.x0 + 150, rect.y0 + 45)
         index = STAMPS.index(style.stamp) if style.stamp in STAMPS else 0
         annot = page.add_stamp_annot(rect, stamp=index)
+    elif kind == "image":
+        if image is None:
+            if not style.image:
+                raise ValueError("Choose a picture for the image stamp.")
+            image = Path(style.image).read_bytes()
+        try:
+            picture = fitz.Pixmap(image)
+        except Exception as exc:
+            raise ValueError("The image could not be read (use PNG or JPEG).") from exc
+        if rect.width < 20 or rect.height < 20:
+            # A click: place at a sensible size, keeping the picture's proportions.
+            width = 150.0
+            height = width * picture.height / max(picture.width, 1)
+            rect = fitz.Rect(rect.x0, rect.y0, rect.x0 + width, rect.y0 + height)
+        annot = page.add_stamp_annot(rect, stamp=image)
     elif kind == "redact":
         annot = page.add_redact_annot(rect, fill=fill or (0, 0, 0))
     else:
@@ -491,6 +518,11 @@ def read_style(page: fitz.Page, xref: int) -> Style:
     elif annot.type[0] == fitz.PDF_ANNOT_STAMP:
         name = _get_string(doc, xref, "Name")
         style.stamp = name if name in STAMPS else style.stamp
+    if kind == "volume":
+        try:
+            style.depth = float(_get_string(doc, xref, DEPTH_KEY) or 1.0)
+        except ValueError:
+            style.depth = 1.0
     return style
 
 
@@ -563,6 +595,9 @@ def apply_style(page: fitz.Page, xref: int, style: Style) -> None:
         annot.set_line_ends(LINE_ENDS.get(style.line_start, 0), LINE_ENDS.get(style.line_end, 0))
     annot.set_opacity(opacity)
     annot.update()
+    if kind == "volume":
+        _set_string(page.parent, xref, DEPTH_KEY, f"{max(0.0, float(style.depth)):g}")
+        refresh_measurement(page, xref)
 
 
 def set_text(page: fitz.Page, xref: int, text: str) -> None:
@@ -765,7 +800,12 @@ def duplicate_markup(page: fitz.Page, xref: int, dx: float = 12, dy: float = 12,
         points = [point + (dx, dy) for point in markup_points(page, xref)]
     if kind == "pen" or kind == "highlighter":
         points = points or [annot.rect.tl, annot.rect.br]
-    new_xref = create_markup(target, kind, points, style, text=text, author=info.get("title", ""))
+    image = None
+    if kind == "image":
+        # Copy the picture as rendered, so the original file is not needed.
+        image = annot.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=True).tobytes("png")
+    new_xref = create_markup(target, kind, points, style, text=text, author=info.get("title", ""),
+                             image=image)
     status = _get_string(page.parent, xref, STATUS_KEY)
     if status:
         set_status(target, new_xref, status)
@@ -949,6 +989,14 @@ def format_area(value: float, unit: str, precision: int = 2) -> str:
     return f"{value:.{precision}f} sq {unit}"
 
 
+def format_volume(value: float, unit: str, precision: int = 2) -> str:
+    unit = "ft" if unit == "ft-in" else unit
+    text = f"{value:.{precision}f} cu {unit}"
+    if unit == "ft":
+        text += f" ({value / 27:.{precision}f} cu yd)"
+    return text
+
+
 def _polyline_length(points: list[fitz.Point], closed: bool = False) -> float:
     total = sum(abs(points[i + 1] - points[i]) for i in range(len(points) - 1))
     if closed and len(points) > 2:
@@ -983,6 +1031,13 @@ def measurement(page: fitz.Page, xref: int) -> tuple[float, str] | None:
     if kind == "area":
         value = _polygon_area(points) * scale.units_per_point ** 2
         return value, format_area(value, scale.unit, scale.precision)
+    if kind == "volume":
+        try:
+            depth = float(_get_string(page.parent, xref, DEPTH_KEY) or 1.0)
+        except ValueError:
+            depth = 1.0
+        value = _polygon_area(points) * scale.units_per_point ** 2 * depth
+        return value, format_volume(value, scale.unit, scale.precision)
     value = _polyline_length(points, closed=kind == "perimeter") * scale.units_per_point
     return value, format_length(value, scale.unit, scale.precision)
 
@@ -1053,6 +1108,7 @@ def list_markups(doc: fitz.Document) -> list[dict]:
                 "color": rgb_to_hex(colors.get("stroke") or colors.get("fill")),
                 "measurement": result[1] if result else "",
                 "value": result[0] if result else None,
+                "unit": page_scale(page).unit if result else "",
             })
     return rows
 
@@ -1067,6 +1123,32 @@ def export_markups_csv(rows: list[dict], output) -> None:
         for row in rows:
             writer.writerow([row["page"] + 1 if column == "page" else row.get(column, "")
                              for column in columns])
+
+
+def format_measure(kind: str, value: float, unit: str, precision: int = 2) -> str:
+    """Display text for a measured (or totalled) value of a given measurement kind."""
+    if kind == "count":
+        return f"{value:g}"
+    if kind == "angle":
+        return f"{value:.1f}°"
+    if kind == "area":
+        return format_area(value, unit, precision)
+    if kind == "volume":
+        return format_volume(value, unit, precision)
+    return format_length(value, unit, precision)
+
+
+def measurement_summary(rows: list[dict]) -> list[tuple[str, str, int]]:
+    """(subject, total text, count) per subject, kind, and unit; angles are skipped."""
+    groups: dict[tuple[str, str, str], tuple[float, int]] = {}
+    for row in rows:
+        if row["value"] is None or row["kind"] == "angle":
+            continue
+        key = (row["subject"] or row["type"], row["kind"], row.get("unit", ""))
+        value, count = groups.get(key, (0.0, 0))
+        groups[key] = (value + row["value"], count + 1)
+    return [(subject, format_measure(kind, value, unit), count)
+            for (subject, kind, unit), (value, count) in sorted(groups.items())]
 
 
 def measurement_totals(rows: list[dict]) -> dict[str, tuple[float, int]]:
