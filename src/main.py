@@ -34,13 +34,14 @@ import markups
 import ocr
 import printing
 import report
+import sets
 from recovery import RecoveryStore
 import pdf_operations as ops
 from canvas import PdfCanvas
 from dialogs import BatchDialog, CalibrateDialog, FormDialog, ScaleDialog
 from markups import KIND_LABELS, MEASURE_KINDS, Style, default_style
 from panels import (BookmarksPanel, LayersPanel, MarkupsList, PropertiesPanel, SearchPanel,
-                    ThumbnailsPanel, ToolChestPanel, search_document)
+                    SetsPanel, ThumbnailsPanel, ToolChestPanel, search_document)
 from pdf_document import PdfSession
 from tool_chest import MY_TOOLS, ToolChest, ToolPreset
 
@@ -156,6 +157,12 @@ class MainWindow(QMainWindow):
         self._update_actions()
         if self.recovery is not None:
             QTimer.singleShot(400, self._offer_recovery)
+        last_set = str(self.settings.value("lastSet", "") or "")
+        if recovery and last_set and Path(last_set).is_file():
+            try:
+                self._show_set(sets.DrawingSet.load(last_set))
+            except Exception:
+                self.settings.remove("lastSet")
 
     # -- construction ---------------------------------------------------------
     def _make_start_page(self) -> QWidget:
@@ -189,11 +196,15 @@ class MainWindow(QMainWindow):
         self.tool_chest = ToolChestPanel(self.chest)
         self.search = SearchPanel()
         self.markups_list = MarkupsList()
+        self.sets_panel = SetsPanel()
+        self.drawing_set: sets.DrawingSet | None = None
         self.thumb_dock = self._dock("Thumbnails", "ThumbnailsDock", self.thumbnails, left)
         self.bookmark_dock = self._dock("Bookmarks", "BookmarksDock", self.bookmarks, left)
         self.layer_dock = self._dock("Layers", "LayersDock", self.layers, left)
         self.tabifyDockWidget(self.thumb_dock, self.bookmark_dock)
         self.tabifyDockWidget(self.bookmark_dock, self.layer_dock)
+        self.sets_dock = self._dock("Sets", "SetsDock", self.sets_panel, left)
+        self.tabifyDockWidget(self.layer_dock, self.sets_dock)
         self.thumb_dock.raise_()
         self.props_dock = self._dock("Properties", "PropertiesDock", self.properties, right)
         self.chest_dock = self._dock("Tool Chest", "ToolChestDock", self.tool_chest, right)
@@ -229,6 +240,11 @@ class MainWindow(QMainWindow):
         self.markups_list.statusRequested.connect(self._set_status)
         self.markups_list.deleteRequested.connect(self._delete_markups)
         self.markups_list.exportRequested.connect(self._export_markups)
+        self.sets_panel.sheetActivated.connect(self._open_set_sheet)
+        self.sets_panel.actionRequested.connect(self._set_action)
+        self.sets_panel.removeRequested.connect(self._set_remove)
+        self.sets_panel.moveRequested.connect(self._set_move)
+        self.sets_panel.searchRequested.connect(self._set_search)
 
     def _action(self, text: str, slot=None, shortcut=None, checkable: bool = False,
                 tip: str = "") -> QAction:
@@ -325,6 +341,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.close_action)
+        sets_menu = file_menu.addMenu("Se&ts")
+        for text, action in (("New Set…", "new"), ("Open Set…", "open"),
+                             ("Add Files to Set…", "add"), ("Markup Summary for Set…", "report"),
+                             ("Close Set", "close")):
+            sets_menu.addAction(text, lambda a=action: self._set_action(a))
         file_menu.addSeparator()
         file_menu.addAction(self.print_action)
         file_menu.addAction(self.print_preview_action)
@@ -355,7 +376,8 @@ class MainWindow(QMainWindow):
             view.addSeparator() if action is None else view.addAction(action)
         view.addSeparator()
         panels = view.addMenu("&Panels")
-        for dock in (self.thumb_dock, self.bookmark_dock, self.layer_dock, self.props_dock,
+        for dock in (self.thumb_dock, self.bookmark_dock, self.layer_dock, self.sets_dock,
+                     self.props_dock,
                      self.chest_dock, self.search_dock, self.markups_dock):
             panels.addAction(dock.toggleViewAction())
         self.toolbars_menu = view.addMenu("&Toolbars")
@@ -656,6 +678,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not save PDF", str(exc))
             return False
         self._recovered.discard(view.session.path)
+        if self.drawing_set is not None and view.session.path in self.drawing_set.files:
+            self.sets_panel.show_set(self.drawing_set)
         if self.recovery is not None:
             self.recovery.forget(view.session)
         self._update_tab_title(view)
@@ -2065,6 +2089,92 @@ class MainWindow(QMainWindow):
             edited = dialog.items
             self._apply(view, "Edit Viewports",
                         lambda doc: markups.set_viewports(doc[page], edited))
+
+    # -- sets -----------------------------------------------------------------------------
+    def _show_set(self, drawing_set: "sets.DrawingSet | None") -> None:
+        self.drawing_set = drawing_set
+        self.sets_panel.show_set(drawing_set)
+        self.settings.setValue("lastSet", str(drawing_set.path) if drawing_set else "")
+        if drawing_set is not None:
+            self.sets_dock.show()
+            self.sets_dock.raise_()
+
+    def _open_docs(self) -> dict:
+        return {view.session.path: view.session.doc for view in self.views()}
+
+    def _set_action(self, action: str) -> None:
+        if action == "new":
+            path, _ = QFileDialog.getSaveFileName(self, "New set", str(Path(self._last_dir())
+                                                                       / "Drawings.nset"),
+                                                  "Northstar sets (*.nset)")
+            if not path:
+                return
+            path = Path(path).with_suffix(sets.SET_SUFFIX)
+            drawing_set = sets.DrawingSet(path.resolve(), path.stem)
+            files, _ = QFileDialog.getOpenFileNames(self, "Choose the set's PDFs",
+                                                    str(path.parent), "PDF files (*.pdf)")
+            drawing_set.add(files)
+            drawing_set.save()
+            self._show_set(drawing_set)
+        elif action == "open":
+            path, _ = QFileDialog.getOpenFileName(self, "Open set", self._last_dir(),
+                                                  "Northstar sets (*.nset)")
+            if path:
+                try:
+                    self._show_set(sets.DrawingSet.load(path))
+                except Exception as exc:
+                    QMessageBox.warning(self, "Open set", str(exc))
+        elif action == "close":
+            self._show_set(None)
+        elif self.drawing_set is None:
+            QMessageBox.information(self, "Sets", "Create or open a set first.")
+        elif action == "add":
+            files, _ = QFileDialog.getOpenFileNames(self, "Add PDFs to the set",
+                                                    str(self.drawing_set.path.parent),
+                                                    "PDF files (*.pdf)")
+            if self.drawing_set.add(files):
+                self.drawing_set.save()
+                self.sets_panel.show_set(self.drawing_set)
+        elif action == "report":
+            rows = self.drawing_set.markup_rows(self._open_docs())
+            if not rows:
+                QMessageBox.information(self, "Set summary", "No file in the set has markups.")
+                return
+            output, _ = QFileDialog.getSaveFileName(
+                self, "Save set markup summary", str(self.drawing_set.path.with_name(
+                    self.drawing_set.path.stem + "_markup_summary.pdf")), "PDF files (*.pdf)")
+            if output:
+                if not output.lower().endswith(".pdf"):
+                    output += ".pdf"
+                report.write_summary(None, output, self.drawing_set.name, rows)
+                self.open_file(output)
+
+    def _set_remove(self, path: str) -> None:
+        if self.drawing_set is not None:
+            self.drawing_set.remove(path)
+            self.drawing_set.save()
+            self.sets_panel.show_set(self.drawing_set)
+
+    def _set_move(self, path: str, step: int) -> None:
+        if self.drawing_set is not None:
+            self.drawing_set.move(path, step)
+            self.drawing_set.save()
+            self.sets_panel.show_set(self.drawing_set)
+
+    def _set_search(self, text: str) -> None:
+        if self.drawing_set is None or not text.strip():
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            hits = self.drawing_set.search(text, self._open_docs())
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.sets_panel.show_results(hits)
+
+    def _open_set_sheet(self, path: str, page: int) -> None:
+        view = self.open_file(path)
+        if view is not None:
+            QTimer.singleShot(0, lambda: view.canvas.go_to_page(page))
 
     def _auto_link(self) -> None:
         view = self.view()

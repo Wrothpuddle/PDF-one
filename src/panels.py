@@ -160,7 +160,8 @@ class PropertiesPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.heading)
         layout.addLayout(form)
-        layout.addWidget(QLabel("Comment"))
+        self.comment_label = QLabel("Comment")
+        layout.addWidget(self.comment_label)
         layout.addWidget(self.comment)
         layout.addWidget(self.thread_label)
         layout.addWidget(self.thread)
@@ -199,6 +200,8 @@ class PropertiesPanel(QWidget):
             self._row_visible(label, False)
         self.comment.setEnabled(False)
         self.save_tool.setEnabled(False)
+        for widget in (self.comment_label, self.comment, self.save_tool):
+            widget.hide()
         self.set_replies(None)
         self._loading = False
 
@@ -248,6 +251,8 @@ class PropertiesPanel(QWidget):
         self.depth.setValue(style.depth)
         self._image = style.image
         self.comment.setEnabled(comment is not None)
+        for widget in (self.comment_label, self.comment, self.save_tool):
+            widget.show()
         self.comment.setPlainText(comment or "")
         self.status.setCurrentText(status or "")
         self.measurement.setText(measurement)
@@ -792,3 +797,105 @@ def search_document(doc: fitz.Document, text: str, match_case: bool = False,
                     continue
             hits.append((page.number, rect, context))
     return hits
+
+
+class SetsPanel(QWidget):
+    """A drawing set: every sheet of every file, set-wide search, and file ordering."""
+
+    sheetActivated = Signal(str, int)      # file path, page
+    actionRequested = Signal(str)          # new, open, add, close, report
+    removeRequested = Signal(str)
+    moveRequested = Signal(str, int)
+    searchRequested = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.title = QLabel("No set open")
+        self.title.setStyleSheet("font-weight:600; padding:2px 0 4px 0;")
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.itemDoubleClicked.connect(self._activated)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
+        buttons = QHBoxLayout()
+        for text, action in (("New…", "new"), ("Open…", "open"), ("Add Files…", "add"),
+                             ("Report…", "report")):
+            button = QPushButton(text)
+            button.clicked.connect(lambda checked=False, a=action: self.actionRequested.emit(a))
+            buttons.addWidget(button)
+        self.add_button = buttons.itemAt(2).widget()
+        self.report_button = buttons.itemAt(3).widget()
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Search every file in the set…")
+        self.query.returnPressed.connect(lambda: self.searchRequested.emit(self.query.text()))
+        self.results = QListWidget()
+        self.results.setMaximumHeight(160)
+        self.results.itemDoubleClicked.connect(
+            lambda item: self.sheetActivated.emit(*item.data(Qt.ItemDataRole.UserRole)))
+        self.results.itemClicked.connect(
+            lambda item: self.sheetActivated.emit(*item.data(Qt.ItemDataRole.UserRole)))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self.title)
+        layout.addLayout(buttons)
+        layout.addWidget(self.tree, 1)
+        layout.addWidget(self.query)
+        layout.addWidget(self.results)
+        self.show_set(None)
+
+    def show_set(self, drawing_set) -> None:
+        self.tree.clear()
+        self.results.clear()
+        has_set = drawing_set is not None
+        for widget in (self.add_button, self.report_button, self.query, self.results):
+            widget.setEnabled(has_set)
+        if not has_set:
+            self.title.setText("No set open — create one to group drawing files")
+            return
+        total = 0
+        for file in drawing_set.files:
+            sheets = drawing_set.sheets(file)
+            top = QTreeWidgetItem([file.name + ("" if sheets is not None else
+                                                "  (missing or locked)")])
+            top.setData(0, Qt.ItemDataRole.UserRole, (str(file), 0))
+            top.setToolTip(0, str(file))
+            font = top.font(0)
+            font.setBold(True)
+            top.setFont(0, font)
+            for sheet in sheets or []:
+                child = QTreeWidgetItem([f"{sheet.page + 1}.  {sheet.title}"])
+                child.setData(0, Qt.ItemDataRole.UserRole, (str(file), sheet.page))
+                top.addChild(child)
+            total += len(sheets or [])
+            self.tree.addTopLevelItem(top)
+        self.tree.expandAll()
+        self.title.setText(f"{drawing_set.name} — {len(drawing_set.files)} files, {total} sheets")
+
+    def show_results(self, hits: list[dict]) -> None:
+        self.results.clear()
+        for hit in hits:
+            item = QListWidgetItem(f"{hit['file'].name} p.{hit['page'] + 1}: {hit['context']}")
+            item.setData(Qt.ItemDataRole.UserRole, (str(hit["file"]), hit["page"]))
+            self.results.addItem(item)
+        if not hits:
+            self.results.addItem("No matches")
+
+    def _activated(self, item: QTreeWidgetItem) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data:
+            self.sheetActivated.emit(*data)
+
+    def _context_menu(self, position) -> None:
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+        while item.parent() is not None:
+            item = item.parent()
+        path = item.data(0, Qt.ItemDataRole.UserRole)[0]
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self.sheetActivated.emit(path, 0))
+        menu.addAction("Move Up", lambda: self.moveRequested.emit(path, -1))
+        menu.addAction("Move Down", lambda: self.moveRequested.emit(path, 1))
+        menu.addSeparator()
+        menu.addAction("Remove from Set", lambda: self.removeRequested.emit(path))
+        menu.exec(self.tree.viewport().mapToGlobal(position))

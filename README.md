@@ -36,6 +36,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Overlay Pages** combines two revisions into a new view: red means only in the older revision, cyan means only in the newer one, and black means unchanged.
 - **Snapshot** copies any area of a page to the clipboard as an image.
 - **Links:** the Link tool turns any area into a link to another page, and clicking a link with Select follows it. **Auto-Link Sheet Numbers** finds sheet numbers (such as A-101, taken from bookmarks or page labels) in the page text and links every mention to that sheet.
+- **Sets** (File → Sets, or the Sets panel) group a project's PDFs into one package. The panel lists every sheet of every file by its bookmark title or page label; double-click a sheet to open it at that page. Search across every file in the set, reorder or remove files, and write one markup summary report for the whole set. A set is a small `.nset` file with paths relative to it, so the project folder can be moved or shared. The last set opens again at startup.
 - **Batch Process** (Tools menu) applies actions to many PDFs at once: set a scale, auto-link sheet numbers, stamp the first page, flatten markups, password-protect, and write summary reports or CSVs. Results go to an output folder; originals are never changed.
 - **Markup Summary Report** writes a PDF with markup counts by type and status, measurement totals, and a row for every markup.
 
@@ -91,6 +92,7 @@ To make a local executable, run the `pyinstaller` command in `.github/workflows/
 | `src/printing.py` | Printing |
 | `src/recovery.py` | Autosave copies and crash recovery |
 | `src/batch.py` | Batch processing |
+| `src/sets.py` | Drawing sets (multi-file packages) |
 | `src/ocr.py` | OCR text layer for scanned pages |
 | `tools/get_tessdata.py` | Downloads and verifies the OCR language data |
 | `src/icons.py` | Toolbar icons drawn in code |
@@ -115,6 +117,6 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 ## Not implemented yet
 
 - **Document content:** digital signatures and certificate validation; Office and image conversion; OCR languages other than English (add `<lang>.traineddata` files to the `tessdata` folder).
-- **Multi-file and collaboration:** Sets (multi-file drawing packages) and real-time collaboration (left out on purpose to keep the app offline).
+- **Collaboration:** real-time collaboration such as Bluebeam Studio (left out on purpose to keep the app offline).
 - **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.
 - **Standards:** PDF/A and PDF/X validation, and accessibility tagging.

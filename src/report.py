@@ -55,12 +55,15 @@ def build_html(title: str, rows: list[dict],
             parts.append(f"<tr><td>{_cell(subject)}</td><td>{_cell(total)}</td>"
                          f"<td class='num'>{count}</td></tr>")
         parts.append("</table>")
-    parts.append("<h2>Markups</h2><table><tr><th>Page</th><th>Type</th><th>Subject</th>"
+    with_files = any("file" in row for row in rows)  # a report for a whole set
+    parts.append("<h2>Markups</h2><table><tr>" + ("<th>File</th>" if with_files else "")
+                 + "<th>Page</th><th>Type</th><th>Subject</th>"
                  "<th>Comment</th><th>Author</th><th>Date</th><th>Status</th>"
                  "<th>Measurement</th></tr>")
-    for row in sorted(rows, key=lambda r: (r["page"], r["type"])):
+    for row in sorted(rows, key=lambda r: (r.get("file", ""), r["page"], r["type"])):
         parts.append(
-            f"<tr><td class='num'>{row['page'] + 1}</td><td>{_cell(row['type'])}</td>"
+            "<tr>" + (f"<td>{_cell(row.get('file', ''))}</td>" if with_files else "")
+            + f"<td class='num'>{row['page'] + 1}</td><td>{_cell(row['type'])}</td>"
             f"<td>{_cell(row['subject'])}</td><td>{_cell(row['comment'])}"
             + "".join(f"<br/><i>&#8627; {_cell(reply['author'] or 'Reply')}: "
                       f"{_cell(reply['text'])}</i>"
@@ -72,12 +75,13 @@ def build_html(title: str, rows: list[dict],
     return "".join(parts)
 
 
-def write_summary(doc: fitz.Document, output: str | Path, title: str,
+def write_summary(doc: fitz.Document | None, output: str | Path, title: str,
                   rows: list[dict] | None = None) -> Path:
     """Write the report as a landscape Letter PDF."""
     rows = markups.list_markups(doc) if rows is None else rows
+    # Reply threads are looked up in doc, so skip them for multi-file (set) reports.
     threads = {(row["page"], row["xref"]): markups.replies(doc[row["page"]], row["xref"])
-               for row in rows if row.get("replies")}
+               for row in rows if row.get("replies") and "file" not in row} if doc else {}
     output = Path(output)
     story = fitz.Story(html=build_html(title, rows, threads), user_css=CSS)
     page_rect = fitz.paper_rect("letter-l")
