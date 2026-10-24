@@ -159,6 +159,7 @@ class InteractivePdfView(QPdfView):
 
     annotationGesture = Signal(object)
     selectionGesture = Signal(object)
+    escapePressed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -356,8 +357,7 @@ class InteractivePdfView(QPdfView):
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            self.set_annotation_tool("select")
-            self.show_selected_object(None)
+            self.escapePressed.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -494,6 +494,7 @@ class MainWindow(QMainWindow):
         self._text_editor: TextPlacementEditor | None = None
         self._text_active_tab: PdfTab | None = None
         self._text_context: dict | None = None
+        self._selected_text_box: tuple[PdfTab, int, int, tuple] | None = None
         self.tabs = QTabWidget(self)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
@@ -503,12 +504,21 @@ class MainWindow(QMainWindow):
         self._make_toolbar()
         self._make_tool_dock()
         self._make_menus()
+        self._make_markup_toolbar()
         self.escape_action = QAction("Return to cursor", self)
         self.escape_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
         self.escape_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self.escape_action.triggered.connect(self._escape_to_pointer)
         self.addAction(self.escape_action)
         self._make_workspace_tabs()
+        self.active_tool_indicator = QLabel("TOOL  SELECT", self)
+        self.active_tool_indicator.setAccessibleName("Current tool")
+        self.active_tool_indicator.setStyleSheet(
+            "QLabel { background:#e8f1f9; color:#123b5d; border:1px solid #9db6c9;"
+            " border-radius:3px; padding:4px 9px; font-weight:700; }"
+        )
+        self.statusBar().addPermanentWidget(self.active_tool_indicator)
+        self._update_tool_indicator("select")
         self.tabs.currentChanged.connect(self._refresh_active_document)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.statusBar().showMessage("Ready · offline · scroll to zoom · middle-drag to pan")
@@ -909,6 +919,10 @@ class MainWindow(QMainWindow):
         tab.view.annotationGesture.connect(
             lambda gesture, target=tab: self._handle_annotation_gesture(target, gesture)
         )
+        tab.view.selectionGesture.connect(
+            lambda gesture, target=tab: self._handle_selection_gesture(target, gesture)
+        )
+        tab.view.escapePressed.connect(self._escape_to_pointer)
         index = self.tabs.addTab(tab, Path(path).name)
         self.tabs.setCurrentIndex(index)
         recent = self.settings.value("recentFiles", [], type=list)
