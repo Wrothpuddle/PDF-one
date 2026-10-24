@@ -288,7 +288,7 @@ class PdfCanvas(QGraphicsView):
         delta = new_view - anchor_view.toPoint()
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + delta.x())
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + delta.y())
-        self.refresh_overlays()
+        self.refresh_overlays(document=False)
         self.zoomChanged.emit(zoom)
         self.schedule_render()
 
@@ -505,7 +505,7 @@ class PdfCanvas(QGraphicsView):
     # -- selection -----------------------------------------------------------
     def set_selection(self, selection: list[tuple[int, int]]) -> None:
         self.selection = list(dict.fromkeys(selection))
-        self.refresh_overlays()
+        self.refresh_overlays(document=False)
         self.selectionChanged.emit()
 
     def _clear_items(self, items: list) -> None:
@@ -514,10 +514,13 @@ class PdfCanvas(QGraphicsView):
                 self.scene().removeItem(item)
         items.clear()
 
-    def refresh_overlays(self) -> None:
-        """Redraw selection outlines/handles and measurement labels."""
+    def refresh_overlays(self, document: bool = True) -> None:
+        """Redraw selection handles; with document=True also labels and search hits.
+
+        Labels ignore view transforms and search rectangles scale with the view,
+        so zooming and selecting only need the (screen-sized) handles redrawn.
+        """
         self._clear_items(self._overlay)
-        self._clear_items(self._labels)
         scene = self.scene()
         handle = HANDLE / max(self.zoom, 0.01)
         doc = self.session.doc
@@ -561,8 +564,10 @@ class PdfCanvas(QGraphicsView):
                 shape.setZValue(41)
                 shape.setData(0, (kind, key, index, xref))
                 self._overlay.append(shape)
-        self._draw_measure_labels()
-        self._redraw_search()
+        if document:
+            self._clear_items(self._labels)
+            self._draw_measure_labels()
+            self._redraw_search()
 
     def _draw_measure_labels(self) -> None:
         doc = self.session.doc

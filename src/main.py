@@ -937,16 +937,13 @@ class MainWindow(QMainWindow):
             for xref in xrefs:
                 markups.move_markup(doc[page], xref, dx, dy)
         self._apply(view, "Move", move)
-        view.canvas.refresh_overlays()
 
     def _resize_markup(self, view: DocumentView, page: int, xref: int, rect) -> None:
         self._apply(view, "Resize", lambda doc: markups.resize_markup(doc[page], xref, rect))
-        view.canvas.refresh_overlays()
 
     def _reshape_markup(self, view: DocumentView, page: int, xref: int, points: list) -> None:
         self._apply(view, "Edit Points", lambda doc: markups.set_markup_points(doc[page], xref,
                                                                                  points))
-        view.canvas.refresh_overlays()
 
     def _edit_text(self, view: DocumentView, page: int, xref: int) -> None:
         pdf_page = view.session.doc[page]
@@ -1004,7 +1001,6 @@ class MainWindow(QMainWindow):
                         style.stroke = style.text_color
                     markups.apply_style(pdf_page, xref, style)
             self._apply(view, "Change Properties", apply)
-            view.canvas.refresh_overlays()
         elif self.tool in KIND_LABELS:
             self.tool_styles[self.tool] = style
 
