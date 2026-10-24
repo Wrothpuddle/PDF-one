@@ -1671,6 +1671,7 @@ def self_test() -> int:
         initial_width = preview.width()
         preview.resize(initial_width + 24, preview.height() + 16)
         resize_ok = preview.width() == initial_width + 24
+        preview.text_edit.moveCursor(QTextCursor.MoveOperation.End)
         preview.text_edit.keyPressEvent(QKeyEvent(
             QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
             Qt.KeyboardModifier.ControlModifier,
