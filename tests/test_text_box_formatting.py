@@ -36,7 +36,7 @@ def test_formatted_text_box_is_page_content_selectable_and_visible(tmp_path: Pat
     assert "Live preview" in extracted
     assert "second line" in extracted
     assert not list(page.annots() or [])
-    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), clip=fitz.Rect(72, 500, 360, 700))
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), clip=fitz.Rect(72, 92, 360, 292))
     assert any(pixel < 245 for pixel in pix.samples)
     spans = [span for block in page.get_text("dict")["blocks"]
              for line in block.get("lines", []) for span in line["spans"]]
