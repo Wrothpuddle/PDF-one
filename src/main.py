@@ -267,6 +267,10 @@ class MainWindow(QMainWindow):
         self.lock_action.toggled.connect(lambda on: setattr(self, "tool_locked", on))
         self.ortho_action = a("&Ortho (snap lines to 45°)", None, "F8", checkable=True)
         self.ortho_action.toggled.connect(self._set_ortho)
+        self.snap_action = a("S&nap to Content", None, "F9", checkable=True,
+                             tip="Snap points to line endpoints, midpoints, and intersections")
+        self.snap_action.setChecked(self.settings.value("snapToContent", True, type=bool))
+        self.snap_action.toggled.connect(self._set_snap)
         self.find_action = a("&Find…", self._focus_search, QKeySequence.StandardKey.Find)
         self.find_next_action = a("Find &Next", lambda: self._step_search(1), "F3")
         self.find_prev_action = a("Find Pre&vious", lambda: self._step_search(-1), "Shift+F3")
@@ -371,6 +375,7 @@ class MainWindow(QMainWindow):
         measure = bar.addMenu("Mea&sure")
         measure.addAction(self.tool_actions["calibrate"])
         self._doc_menu_action(measure, "Set Scale…", self._set_scale)
+        measure.addAction(self.snap_action)
         measure.addSeparator()
         for kind in MEASURE_TOOLS:
             measure.addAction(self.tool_actions[kind])
@@ -449,6 +454,7 @@ class MainWindow(QMainWindow):
         self.scale_button = QAction("Scale: 1:1", self)
         self.scale_button.triggered.connect(self._set_scale)
         measure.addAction(self.scale_button)
+        measure.addAction(self.snap_action)
         measure.addSeparator()
         for kind in MEASURE_TOOLS:
             measure.addAction(self.tool_actions[kind])
@@ -541,6 +547,7 @@ class MainWindow(QMainWindow):
             self.tabs.removeTab(self.tabs.indexOf(self.start_page))
         canvas.set_tool(self.tool if self.tool not in ("crop",) else "select")
         canvas.ortho = self.ortho_action.isChecked()
+        canvas.set_snap(self.snap_action.isChecked())
         if title is None:
             self._remember_recent(path)
         self.settings.setValue("lastDirectory", str(Path(path).parent))
@@ -844,6 +851,11 @@ class MainWindow(QMainWindow):
 
     def _toggle_full_screen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    def _set_snap(self, on: bool) -> None:
+        self.settings.setValue("snapToContent", on)
+        for view in self.views():
+            view.canvas.set_snap(on)
 
     def _set_ortho(self, on: bool) -> None:
         for view in self.views():
@@ -1947,6 +1959,15 @@ def self_test() -> int:
                        and abs(lengths[0]["value"] - 10) < tolerance
                        and lengths[0]["measurement"] == markups.format_length(
                            lengths[0]["value"], "ft-in")))
+        # The page has a rectangle at (100, 150)-(500, 450): a click 3 pt away from
+        # its corner should land exactly on it.
+        window.snap_action.setChecked(True)
+        window.set_tool("length")
+        drag((103, 152), (300, 448))
+        snapped = [r for r in markups.list_markups(session.doc) if r["kind"] == "length"][-1]
+        start, end = markups.markup_points(session.doc[0], snapped["xref"])
+        checks.append(("Snap to drawing corners", abs(start - fitz.Point(100, 150)) < 0.01
+                       and abs(end.y - 450) < 0.01))
         window._refresh_panels()
         checks.append(("Markups List shows every markup",
                        window.markups_list.table.rowCount() == len(markups.list_markups(session.doc))))

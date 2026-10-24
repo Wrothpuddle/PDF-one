@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsPathItem,
                                QGraphicsView, QPlainTextEdit)
 
 import markups
+import snap
 from pdf_document import PdfSession
 
 PAGE_GAP = 18.0
@@ -146,6 +147,12 @@ class PdfCanvas(QGraphicsView):
         self.tool = "select"
         self.selection: list[tuple[int, int]] = []  # (page, xref)
         self.ortho = False
+        self.snap_enabled = True
+        self._snap_content: dict[int, tuple[tuple, list]] = {}
+        self._snap_index: dict[int, snap.SnapIndex] = {}
+        self._snap_exclude: set[int] = set()
+        self._last_snap: tuple[fitz.Point, str] | None = None
+        self._snap_items: list[QGraphicsItem] = []
         self._overlay: list[QGraphicsItem] = []
         self._labels: list[QGraphicsItem] = []
         self._search_items: list[QGraphicsItem] = []
@@ -203,6 +210,7 @@ class PdfCanvas(QGraphicsView):
                     if i < doc.page_count]
         self.selection = [(p, x) for p, x in self.selection
                           if p < doc.page_count and self._annot_exists(p, x)]
+        self._snap_index.clear()
         if sizes != expected or self.current_page >= doc.page_count:
             keep_page = min(self.current_page, doc.page_count - 1)
             self.current_page = keep_page
@@ -376,6 +384,10 @@ class PdfCanvas(QGraphicsView):
     def hit_page(self, view_pos, clamp: bool = False) -> tuple[int, QPointF] | None:
         """Page under a viewport position and the point on its visible page."""
         scene = self.mapToScene(view_pos.toPoint() if hasattr(view_pos, "toPoint") else view_pos)
+        return self.hit_scene(scene, clamp)
+
+    def hit_scene(self, scene: QPointF, clamp: bool = False) -> tuple[int, QPointF] | None:
+        """Page containing a scene point and the point on its visible page."""
         for item in self.pages:
             local = scene - item.pos()
             if 0 <= local.x() <= item.width and 0 <= local.y() <= item.height:
@@ -392,6 +404,79 @@ class PdfCanvas(QGraphicsView):
         item = self.page_item(index)
         local = scene - item.pos()
         return QPointF(min(max(local.x(), 0), item.width), min(max(local.y(), 0), item.height))
+
+    # -- snapping ----------------------------------------------------------------
+    def _snappable(self) -> bool:
+        if not self.snap_enabled or self._modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return False
+        if self.tool == "select":
+            return bool(self._drag and self._drag.get("mode") == "handle")
+        kind = self._drawing_kind()
+        return kind not in markups.FREEHAND and kind not in markups.TEXT_MARKUP_KINDS \
+            and self.tool not in ("pan", "text_select", "text", "zoom_area", "snapshot")
+
+    def _page_snap_index(self, index: int) -> snap.SnapIndex:
+        page = self.page(index)
+        doc = self.session.doc
+        # Content points only change when the page's drawing does; key them on
+        # the content streams, rotation, and crop box instead of every edit.
+        key = (page.rotation, tuple(page.cropbox),
+               tuple(len(doc.xref_stream_raw(x) or b"") for x in page.get_contents()))
+        cached = self._snap_content.get(index)
+        if cached is None or cached[0] != key:
+            try:
+                cached = (key, snap.content_points(doc, index))
+            except Exception:
+                cached = (key, [])
+            self._snap_content[index] = cached
+            self._snap_index.pop(index, None)
+        if index not in self._snap_index:
+            self._snap_index[index] = snap.SnapIndex(
+                cached[1] + snap.markup_points(page, self._snap_exclude))
+        return self._snap_index[index]
+
+    def _snap(self, scene: QPointF) -> QPointF:
+        """Move a scene point onto nearby linework and show what it snapped to."""
+        self._last_snap = None
+        self._clear_items(self._snap_items)
+        if not self._snappable():
+            return scene
+        hit = self.hit_scene(scene, clamp=bool(self._points))
+        if hit is None:
+            return scene
+        index, local = hit
+        if self._points and index != self._points_page:
+            return scene
+        found = self._page_snap_index(index).nearest(self.to_page(index, local), 9 / self.zoom)
+        if found is None:
+            return scene
+        self._last_snap = found
+        snapped = self.page_item(index).pos() + self.to_visual(index, found[0])
+        self._show_snap_marker(snapped, found[1])
+        return snapped
+
+    def _show_snap_marker(self, scene: QPointF, kind: str) -> None:
+        colour = QColor("#e8590c")
+        marker = QGraphicsRectItem(-5, -5, 10, 10)
+        marker.setPen(QPen(colour, 2))
+        marker.setBrush(Qt.BrushStyle.NoBrush)
+        marker.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        marker.setPos(scene)
+        marker.setZValue(60)
+        label = QGraphicsSimpleTextItem(kind)
+        label.setBrush(colour)
+        label.setFont(QFont("Segoe UI", 8))
+        label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        label.setPos(scene)
+        label.setTransform(label.transform().translate(8, 6))
+        label.setZValue(60)
+        for item in (marker, label):
+            self.scene().addItem(item)
+            self._snap_items.append(item)
+
+    def set_snap(self, enabled: bool) -> None:
+        self.snap_enabled = enabled
+        self._clear_items(self._snap_items)
 
     # -- tools -----------------------------------------------------------------
     def set_tool(self, tool: str) -> None:
@@ -442,6 +527,8 @@ class PdfCanvas(QGraphicsView):
     def _constrain(self, start: QPointF, end: QPointF) -> QPointF:
         """Shift (or ortho mode) snaps lines to 45-degree steps."""
         modifiers = self._modifiers()
+        if self._last_snap is not None:
+            return end  # an exact snap beats the 45-degree constraint
         if not (self.ortho or modifiers & Qt.KeyboardModifier.ShiftModifier):
             return end
         delta = end - start
@@ -703,6 +790,10 @@ class PdfCanvas(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         kind = self._drawing_kind()
+        if self.tool != "select":
+            scene = self._snap(scene)
+        else:
+            self._last_snap = None
         if self.tool == "select":
             self._press_select(event, scene, position)
             return
@@ -712,7 +803,7 @@ class PdfCanvas(QGraphicsView):
                 self._drag = {"mode": "text", "page": hit[0], "start": hit[1]}
             return
         if kind in markups.CLICK_POINTS:
-            hit = self.hit_page(position, clamp=bool(self._points))
+            hit = self.hit_scene(scene, clamp=bool(self._points))
             if hit is None:
                 return
             index, local = hit
@@ -727,7 +818,7 @@ class PdfCanvas(QGraphicsView):
             if kind == "angle" and len(self._points) == 3:
                 self.finish_points()
             return
-        hit = self.hit_page(position)
+        hit = self.hit_scene(scene)
         if hit is None:
             return
         index, local = hit
@@ -742,6 +833,9 @@ class PdfCanvas(QGraphicsView):
         if handle:
             kind, key, index, xref = handle
             bounds = markups.markup_bounds(self.page(index), xref)
+            # Do not snap a vertex onto the markup being reshaped.
+            self._snap_exclude = {xref}
+            self._snap_index.pop(index, None)
             self._drag = {"mode": "handle", "kind": kind, "key": key, "page": index,
                           "xref": xref, "bounds": bounds, "scene_start": scene,
                           "points": markups.markup_points(self.page(index), xref)}
@@ -783,6 +877,12 @@ class PdfCanvas(QGraphicsView):
             self.horizontalScrollBar().setValue(int(h - delta.x()))
             self.verticalScrollBar().setValue(int(v - delta.y()))
             return
+        if self._snappable():
+            scene = self._snap(scene)
+        else:
+            self._last_snap = None
+            if self._snap_items:
+                self._clear_items(self._snap_items)
         if self._points:
             self._update_preview(scene)
             return
@@ -874,6 +974,14 @@ class PdfCanvas(QGraphicsView):
             self._pan_origin = None
             self._restore_cursor()
             return
+        if self._snappable():
+            scene = self._snap(scene)
+        else:
+            self._last_snap = None
+        self._clear_items(self._snap_items)
+        if self._snap_exclude:
+            self._snap_exclude = set()
+            self._snap_index.clear()
         drag, self._drag = self._drag, None
         if self._preview is not None and not self._points:
             self.scene().removeItem(self._preview)
