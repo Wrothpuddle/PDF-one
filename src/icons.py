@@ -202,6 +202,14 @@ def _draw(name: str, p: QPainter, fg: QColor) -> None:
         p.setPen(_pen(BLUE, 1.7))
         p.drawPolyline(_poly((21, 20), (4, 20), (16, 5)))
         p.drawArc(QRectF(-2, 14, 14, 12), 0, 52 * 16)
+    elif name == "link":
+        p.setPen(_pen(BLUE, 2))
+        p.save()
+        p.translate(12, 12)
+        p.rotate(-45)
+        p.drawRoundedRect(QRectF(-10, -3.5, 11, 7), 3.5, 3.5)
+        p.drawRoundedRect(QRectF(-1, -3.5, 11, 7), 3.5, 3.5)
+        p.restore()
     elif name == "lock":
         p.drawRoundedRect(QRectF(5, 11, 14, 10), 2, 2)
         p.drawArc(QRectF(8, 4, 8, 12), 0, 180 * 16)
@@ -259,5 +267,5 @@ ICON_NAMES = ["select", "pan", "text_select", "zoom_area", "zoom_in", "zoom_out"
               "fit_page", "prev_page", "next_page", "crop", "snapshot", "calibrate", "redact",
               "text", "callout", "note", "highlight", "underline", "strikeout", "pen",
               "highlighter", "line", "arrow", "polyline", "polygon", "cloud", "rectangle",
-              "ellipse", "stamp", "length", "polylength", "area", "perimeter", "count", "angle",
+              "ellipse", "stamp", "link", "length", "polylength", "area", "perimeter", "count", "angle",
               "lock", "snap", "undo", "redo", "open", "save", "print"]

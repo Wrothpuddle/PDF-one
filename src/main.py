@@ -29,8 +29,11 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 
 import compare
 import icons
+import links
 import markups
 import printing
+import report
+from recovery import RecoveryStore
 import pdf_operations as ops
 from canvas import PdfCanvas
 from dialogs import CalibrateDialog, FormDialog, ScaleDialog
@@ -51,7 +54,7 @@ MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout"
 MEASURE_TOOLS = ["length", "polylength", "area", "perimeter", "count", "angle"]
 NAV_TOOLS = {"select": "Select", "pan": "Pan", "text_select": "Select Text",
              "zoom_area": "Zoom Area", "crop": "Crop", "snapshot": "Snapshot",
-             "calibrate": "Calibrate", "redact": "Redact"}
+             "calibrate": "Calibrate", "redact": "Redact", "link": "Link"}
 SHORTCUTS = {"select": "V", "pan": "H", "text_select": "Alt+T", "text": "T", "callout": "Q",
              "note": "N", "highlight": "Alt+H", "pen": "P", "line": "L", "arrow": "A",
              "polyline": "Alt+N", "polygon": "Shift+P", "cloud": "C", "rectangle": "R",
@@ -83,7 +86,7 @@ class DocumentView(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, files: list[str] | None = None) -> None:
+    def __init__(self, files: list[str] | None = None, recovery: bool = True) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 900)
@@ -99,6 +102,14 @@ class MainWindow(QMainWindow):
         self.tool_styles: dict[str, Style] = {}
         self.clipboard: tuple[PdfSession, list[tuple[int, int]]] | None = None
         self._temp_files: list[Path] = []
+        self._recovered: set[Path] = set()
+        self.recovery = RecoveryStore(data_dir / "recovery") if recovery else None
+        self._autosaved: dict[int, int] = {}  # id(session) -> revision written
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(60_000)
+        self._autosave_timer.timeout.connect(self._autosave)
+        if self.recovery is not None:
+            self._autosave_timer.start()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(250)
@@ -140,6 +151,8 @@ class MainWindow(QMainWindow):
         for path in files or []:
             self.open_file(path)
         self._update_actions()
+        if self.recovery is not None:
+            QTimer.singleShot(400, self._offer_recovery)
 
     # -- construction ---------------------------------------------------------
     def _make_start_page(self) -> QWidget:
@@ -367,6 +380,10 @@ class MainWindow(QMainWindow):
                 self._doc_menu_action(document, text, slot, key)
         document.addSeparator()
         document.addAction(self.tool_actions["crop"])
+        links_menu = document.addMenu("&Links")
+        links_menu.addAction(self.tool_actions["link"])
+        self._doc_menu_action(links_menu, "Auto-Link Sheet Numbers…", self._auto_link)
+        self._doc_menu_action(links_menu, "Remove Links on This Page", self._remove_page_links)
 
         markup = bar.addMenu("&Markup")
         for kind in ("select", "pan", "text_select", "zoom_area"):
@@ -378,6 +395,7 @@ class MainWindow(QMainWindow):
         markup.addAction(self.lock_action)
         markup.addAction(self.ortho_action)
         markup.addSeparator()
+        self._doc_menu_action(markup, "Markup Summary Report (PDF)…", self._summary_report)
         self._doc_menu_action(markup, "Flatten All Markups…", self._flatten)
 
         measure = bar.addMenu("Mea&sure")
@@ -493,7 +511,7 @@ class MainWindow(QMainWindow):
         for kind in MEASURE_TOOLS:
             measure.addAction(self.tool_actions[kind])
         measure.addSeparator()
-        for kind in ("snapshot", "crop", "redact"):
+        for kind in ("snapshot", "crop", "link", "redact"):
             measure.addAction(self.tool_actions[kind])
 
     def _make_status_bar(self) -> None:
@@ -571,6 +589,9 @@ class MainWindow(QMainWindow):
         canvas.zoomChanged.connect(lambda zoom, v=view: self._zoom_changed(v, zoom))
         canvas.toolFinished.connect(lambda: self.set_tool("select"))
         canvas.contextRequested.connect(lambda *args, v=view: self._canvas_menu(v, *args))
+        canvas.linkActivated.connect(self._follow_link)
+        canvas.linkHovered.connect(lambda text: self.statusBar().showMessage(text, 3000)
+                                   if text else None)
         canvas.textSelected.connect(lambda text: self.statusBar().showMessage(
             f"{len(text.split())} words selected · Ctrl+C to copy", 3000))
         session.add_listener(lambda v=view: self._document_changed(v))
@@ -618,6 +639,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Could not save PDF", str(exc))
             return False
+        self._recovered.discard(view.session.path)
+        if self.recovery is not None:
+            self.recovery.forget(view.session)
         self._update_tab_title(view)
         self.statusBar().showMessage(f"Saved {view.session.path}", 4000)
         return True
@@ -688,6 +712,15 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _confirm_close(self, view: DocumentView) -> bool:
+        if view.session.path in self._recovered and not view.session.dirty:
+            self.tabs.setCurrentWidget(view)
+            answer = QMessageBox.question(
+                self, "Recovered document", "Save this recovered document before closing?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            if answer == QMessageBox.StandardButton.Cancel:
+                return False
+            return answer == QMessageBox.StandardButton.Discard or self.save_as()
         if not view.session.dirty:
             return True
         self.tabs.setCurrentWidget(view)
@@ -708,8 +741,14 @@ class MainWindow(QMainWindow):
                 return
             if self.clipboard and self.clipboard[0] is widget.session:
                 self.clipboard = None
+            if self.recovery is not None:
+                self.recovery.forget(widget.session)
+            # Remove the tab and stop rendering before closing the document, so
+            # no queued paint or tab-change refresh touches a closed file.
+            self.tabs.removeTab(index)
+            widget.canvas.shutdown()
             widget.session.close()
-        if index >= 0:
+        elif index >= 0:
             self.tabs.removeTab(index)
         if widget is not None and widget is not self.start_page:
             widget.deleteLater()
@@ -723,6 +762,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         for view in self.views():
+            if self.recovery is not None:
+                self.recovery.forget(view.session)
+            view.canvas.shutdown()
             view.session.close()
         for path in self._temp_files:
             path.unlink(missing_ok=True)
@@ -1289,6 +1331,15 @@ class MainWindow(QMainWindow):
             mediabox_rect = fitz.Rect(rect) + (offset.x, offset.y, offset.x, offset.y)
             self._apply(view, "Crop", lambda doc: ops.crop_page(doc, page, mediabox_rect))
             self.set_tool("select")
+        elif purpose == "link":
+            count = view.session.page_count
+            target, accepted = QInputDialog.getInt(self, "Link", f"Go to page (1–{count}):",
+                                                   min(count, view.canvas.current_page + 2), 1,
+                                                   count)
+            if accepted:
+                self._apply(view, "Add Link", lambda doc: links.add_page_link(
+                    doc[page], rect, target - 1))
+            self.set_tool("select")
         elif purpose == "snapshot":
             pixmap = view.canvas.render_area(page, rect)
             QGuiApplication.clipboard().setPixmap(pixmap)
@@ -1773,6 +1824,113 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Overlay: red = only in older, cyan = only in newer, "
                                      "black = unchanged", 8000)
 
+    # -- links, report, recovery --------------------------------------------------------
+    def _follow_link(self, kind: str, target) -> None:
+        view = self.view()
+        if view is None:
+            return
+        if kind == "page":
+            view.canvas.go_to_page(int(target))
+            return
+        if kind in ("uri", "file") and target:
+            if QMessageBox.question(self, "Open link", f"Open this link outside Northstar PDF?"
+                                    f"\n\n{target}") == QMessageBox.StandardButton.Yes:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                url = QUrl(str(target)) if kind == "uri" else QUrl.fromLocalFile(
+                    str((view.session.path.parent / str(target)).resolve()))
+                QDesktopServices.openUrl(url)
+
+    def _auto_link(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        ids = links.sheet_ids(view.session.doc)
+        if not ids:
+            QMessageBox.information(
+                self, "Auto-link sheet numbers",
+                "No sheet numbers were found. Name bookmarks or page labels with sheet "
+                "numbers such as \"A-101 Floor Plan\" first.")
+            return
+        listed = ", ".join(sorted(ids)[:12]) + ("…" if len(ids) > 12 else "")
+        if QMessageBox.question(self, "Auto-link sheet numbers",
+                                f"Link every mention of these {len(ids)} sheets to their "
+                                f"pages?\n\n{listed}") != QMessageBox.StandardButton.Yes:
+            return
+        added = self._apply(view, "Auto-Link Sheets",
+                            lambda doc: links.auto_link_sheets(doc, ids))
+        self.statusBar().showMessage(f"Added {added or 0} link(s)", 5000)
+
+    def _remove_page_links(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        page = view.canvas.current_page
+        removed = self._apply(view, "Remove Links", lambda doc: links.remove_links(doc[page]))
+        self.statusBar().showMessage(f"Removed {removed or 0} link(s) from page {page + 1}", 4000)
+
+    def _summary_report(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        rows = markups.list_markups(view.session.doc)
+        if not rows:
+            QMessageBox.information(self, "Markup summary", "This document has no markups.")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Save markup summary", str(view.session.path.with_name(
+                view.session.path.stem + "_markup_summary.pdf")), "PDF files (*.pdf)")
+        if not output:
+            return
+        try:
+            report.write_summary(view.session.doc, output, view.session.path.name, rows)
+        except Exception as exc:
+            QMessageBox.warning(self, "Markup summary", str(exc))
+            return
+        self.open_file(output)
+
+    def _autosave(self) -> None:
+        if self.recovery is None:
+            return
+        for view in self.views():
+            session = view.session
+            if not session.dirty:
+                self.recovery.forget(session)
+                self._autosaved.pop(id(session), None)
+            elif self._autosaved.get(id(session)) != session.revision:
+                try:
+                    self.recovery.save(session)
+                    self._autosaved[id(session)] = session.revision
+                except Exception:
+                    pass  # autosave must never interrupt work
+        self.recovery.heartbeat()
+
+    def _offer_recovery(self) -> None:
+        pending = self.recovery.pending() if self.recovery else []
+        if not pending:
+            return
+        names = "\n".join(f"• {Path(item['original']).name or 'Untitled'}" for item in pending[:10])
+        answer = QMessageBox.question(
+            self, "Recover unsaved work",
+            f"Northstar PDF closed unexpectedly. Recover {len(pending)} unsaved document(s)?"
+            f"\n\n{names}\n\nRecovered copies open as new tabs; use Save As to keep them.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Discard:
+            for item in pending:
+                self.recovery.discard(item["id"])
+            return
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for item in pending:
+            original = Path(item["original"])
+            handle, name = tempfile.mkstemp(prefix=f"recovered-{original.stem}-", suffix=".pdf")
+            os.close(handle)
+            path = self.recovery.claim(item["id"], name).resolve()
+            self._temp_files.append(path)
+            self._recovered.add(path)
+            self.open_file(str(path), f"Recovered: {original.name}")
+
     # -- misc ------------------------------------------------------------------------------
     def _preferences(self) -> None:
         name, accepted = QInputDialog.getText(self, "Preferences",
@@ -1917,7 +2075,7 @@ def self_test() -> int:
     doc.save(source)
     doc.close()
     checks: list[tuple[str, bool]] = []
-    window = MainWindow([str(source)])
+    window = MainWindow([str(source)], recovery=False)
     try:
         window.resize(1300, 900)
         window.show()
@@ -2008,6 +2166,18 @@ def self_test() -> int:
         checks.append(("Markups List shows every markup",
                        window.markups_list.table.rowCount() == len(markups.list_markups(session.doc))))
 
+        window.set_tool("select")
+        canvas.go_to_page(0)
+        window._apply(view, "Link", lambda d: links.add_page_link(d[0], fitz.Rect(600, 500, 700, 560), 2))
+        QTest.qWait(30)
+        target = page_to_view(0, (650, 530)).toPoint()
+        QTest.mouseMove(canvas.viewport(), target)
+        QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, target)
+        QTest.qWait(30)
+        checks.append(("Click a link to jump to its page", canvas.current_page == 2))
+        canvas.go_to_page(0)
+        QTest.qWait(30)
+
         window.search.query.setText("Floor plan")
         window._search("Floor plan", False, False)
         checks.append(("Search all pages", len(view.search_hits) == 3))
@@ -2046,8 +2216,10 @@ def self_test() -> int:
         checks.append((f"Self-test raised {type(exc).__name__}: {exc}", False))
     finally:
         for open_view in window.views():
-            open_view.session.close()
+            open_view.canvas.shutdown()
         window.tabs.clear()
+        for open_view in list(window.findChildren(DocumentView)):
+            open_view.session.close()
         window.close()
         app.processEvents()
     return _report_self_test(checks)

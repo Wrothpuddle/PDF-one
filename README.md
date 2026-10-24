@@ -33,6 +33,8 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Compare Documents** finds visible differences between an older revision and the open drawing, and adds a cloud markup around each change.
 - **Overlay Pages** combines two revisions into a new view: red means only in the older revision, cyan means only in the newer one, and black means unchanged.
 - **Snapshot** copies any area of a page to the clipboard as an image.
+- **Links:** the Link tool turns any area into a link to another page, and clicking a link with Select follows it. **Auto-Link Sheet Numbers** finds sheet numbers (such as A-101, taken from bookmarks or page labels) in the page text and links every mention to that sheet.
+- **Markup Summary Report** writes a PDF with markup counts by type and status, measurement totals, and a row for every markup.
 
 ### Pages and documents
 - **Viewing:** tabs for several documents, continuous or single-page view, wheel zoom at the cursor, middle-drag or Space+drag panning, zoom to area, fit width or page, and sharp rendering at high zoom on large-format sheets.
@@ -42,6 +44,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Printing:** Print (Ctrl+P) and Print Preview, with or without markups, fit to paper or actual size. Landscape sheets rotate automatically to fill portrait paper.
 - **Final output:** true redaction (marked areas are permanently removed when applied), Flatten Markups, and password-protected AES-256 copies. Password-protected PDFs open with their password and stay encrypted when saved.
 - **Undo history:** undo and redo cover every edit, including page operations, and are still available after saving.
+- **Autosave and recovery:** unsaved documents are copied to a recovery folder every minute. After a crash, the next start offers to reopen them.
 
 The crop box hides content outside it but does not remove it. Use Redaction to delete content.
 
@@ -77,6 +80,12 @@ To make a local executable, run the `pyinstaller` command in `.github/workflows/
 | `src/compare.py` | Overlay and difference detection |
 | `src/pdf_operations.py` | Page edits, exports, forms, text replacement, flattening, redaction |
 | `src/dialogs.py` | Scale, calibration, and form-filling dialogs |
+| `src/snap.py` | Snap-to-content targets (endpoints, midpoints, intersections) |
+| `src/links.py` | Page links and sheet-number auto-linking |
+| `src/report.py` | Markup summary PDF |
+| `src/printing.py` | Printing |
+| `src/recovery.py` | Autosave copies and crash recovery |
+| `src/icons.py` | Toolbar icons drawn in code |
 | `src/offline_guard.py` | Blocks network access from Python code |
 
 ## Offline behavior

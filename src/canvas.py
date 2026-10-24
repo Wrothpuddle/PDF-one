@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QPlainTextEdit)
 
+import links
 import markups
 import snap
 from pdf_document import PdfSession
@@ -126,6 +127,8 @@ class PdfCanvas(QGraphicsView):
     toolFinished = Signal()
     textSelected = Signal(str)
     contextRequested = Signal(object, int, object)       # global pos, page, point
+    linkActivated = Signal(str, object)                  # kind, target
+    linkHovered = Signal(str)                            # description or ""
 
     def __init__(self, session: PdfSession, parent=None) -> None:
         super().__init__(parent)
@@ -153,6 +156,9 @@ class PdfCanvas(QGraphicsView):
         self._snap_exclude: set[int] = set()
         self._last_snap: tuple[fitz.Point, str] | None = None
         self._snap_items: list[QGraphicsItem] = []
+        self._links_cache: dict[int, list[dict]] = {}
+        self._link_items: list[QGraphicsItem] = []
+        self._hover_link: dict | None = None
         self._overlay: list[QGraphicsItem] = []
         self._labels: list[QGraphicsItem] = []
         self._search_items: list[QGraphicsItem] = []
@@ -211,6 +217,7 @@ class PdfCanvas(QGraphicsView):
         self.selection = [(p, x) for p, x in self.selection
                           if p < doc.page_count and self._annot_exists(p, x)]
         self._snap_index.clear()
+        self._links_cache.clear()
         if sizes != expected or self.current_page >= doc.page_count:
             keep_page = min(self.current_page, doc.page_count - 1)
             self.current_page = keep_page
@@ -243,7 +250,15 @@ class PdfCanvas(QGraphicsView):
     def visible_scene_rect(self) -> QRectF:
         return self.mapToScene(self.viewport().rect()).boundingRect()
 
+    def shutdown(self) -> None:
+        """Stop pending work before the document is closed."""
+        self._render_timer.stop()
+        self.pages = []
+        self.scene().clear()
+
     def _render_visible(self) -> None:
+        if self.session.doc.is_closed:
+            return
         visible = self.visible_scene_rect()
         ratio = self.devicePixelRatioF()
         desired = self.zoom * ratio
@@ -405,6 +420,42 @@ class PdfCanvas(QGraphicsView):
         local = scene - item.pos()
         return QPointF(min(max(local.x(), 0), item.width), min(max(local.y(), 0), item.height))
 
+    # -- links -----------------------------------------------------------------------
+    def link_under(self, scene: QPointF) -> tuple[int, dict] | None:
+        hit = self.hit_scene(scene)
+        if hit is None:
+            return None
+        index, local = hit
+        if index not in self._links_cache:
+            self._links_cache[index] = links.page_links(self.page(index))
+        point = self.to_page(index, local)
+        for link in reversed(self._links_cache[index]):
+            if link["rect"].contains(point):
+                return index, link
+        return None
+
+    def _show_link_hover(self, found: tuple[int, dict] | None) -> None:
+        link = found[1] if found else None
+        if link is self._hover_link or (link and self._hover_link
+                                        and link["xref"] == self._hover_link["xref"]):
+            return
+        self._hover_link = link
+        self._clear_items(self._link_items)
+        if found is None:
+            self.linkHovered.emit("")
+            return
+        index, link = found
+        rect = self.visual_rect(index, link["rect"]).translated(self.page_item(index).pos())
+        pen = QPen(QColor("#1f6feb"), 1.2)
+        pen.setCosmetic(True)
+        shape = self.scene().addRect(rect, pen, QBrush(QColor(31, 111, 235, 35)))
+        shape.setZValue(35)
+        self._link_items.append(shape)
+        if link["kind"] == "page":
+            self.linkHovered.emit(f"Link to page {link['target'] + 1}")
+        else:
+            self.linkHovered.emit(f"Link: {link['target']}")
+
     # -- snapping ----------------------------------------------------------------
     def _snappable(self) -> bool:
         if not self.snap_enabled or self._modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -509,7 +560,7 @@ class PdfCanvas(QGraphicsView):
 
     def _drawing_kind(self) -> str:
         return {"calibrate": "line", "crop": "rect", "snapshot": "rect",
-                "zoom_area": "rect"}.get(self.tool, self.tool)
+                "zoom_area": "rect", "link": "rect"}.get(self.tool, self.tool)
 
     def _ensure_preview(self, kind: str) -> QGraphicsPathItem:
         if self._preview is None:
@@ -864,6 +915,11 @@ class PdfCanvas(QGraphicsView):
                 self._drag = {"mode": "move", "page": index, "xrefs": same_page,
                               "scene_start": scene, "start": point}
             return
+        found = self.link_under(scene)
+        if found is not None and not additive:
+            self.set_selection([])
+            self.linkActivated.emit(found[1]["kind"], found[1]["target"])
+            return
         if not additive:
             self.set_selection([])
         self._drag = {"mode": "box", "page": index, "start": local, "scene_start": scene}
@@ -891,6 +947,14 @@ class PdfCanvas(QGraphicsView):
             if self.tool == "select":
                 handle = self._handle_at(scene)
                 cursor = Qt.CursorShape.ArrowCursor
+                found = None if handle else self.link_under(scene)
+                if found is not None and markups.markup_at(
+                        self.page(found[0]), self.to_page(found[0], scene - self.page_item(
+                            found[0]).pos()), 4 / self.zoom):
+                    found = None  # a markup on top of the link wins
+                self._show_link_hover(found)
+                if found is not None:
+                    cursor = Qt.CursorShape.PointingHandCursor
                 if handle:
                     cursor = Qt.CursorShape.SizeAllCursor if handle[0] == "vertex" else {
                         "tl": Qt.CursorShape.SizeFDiagCursor, "br": Qt.CursorShape.SizeFDiagCursor,
@@ -1043,7 +1107,7 @@ class PdfCanvas(QGraphicsView):
             return
         end = self.to_page(index, end_local)
         rect = fitz.Rect(start_page, end).normalize()
-        if self.tool in ("crop", "snapshot", "zoom_area"):
+        if self.tool in ("crop", "snapshot", "zoom_area", "link"):
             if moved:
                 if self.tool == "zoom_area":
                     self._zoom_to(index, rect)
