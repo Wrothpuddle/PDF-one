@@ -34,6 +34,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Overlay Pages** combines two revisions into a new view: red means only in the older revision, cyan means only in the newer one, and black means unchanged.
 - **Snapshot** copies any area of a page to the clipboard as an image.
 - **Links:** the Link tool turns any area into a link to another page, and clicking a link with Select follows it. **Auto-Link Sheet Numbers** finds sheet numbers (such as A-101, taken from bookmarks or page labels) in the page text and links every mention to that sheet.
+- **Batch Process** (Tools menu) applies actions to many PDFs at once: set a scale, auto-link sheet numbers, stamp the first page, flatten markups, password-protect, and write summary reports or CSVs. Results go to an output folder; originals are never changed.
 - **Markup Summary Report** writes a PDF with markup counts by type and status, measurement totals, and a row for every markup.
 
 ### Pages and documents
@@ -85,6 +86,7 @@ To make a local executable, run the `pyinstaller` command in `.github/workflows/
 | `src/report.py` | Markup summary PDF |
 | `src/printing.py` | Printing |
 | `src/recovery.py` | Autosave copies and crash recovery |
+| `src/batch.py` | Batch processing |
 | `src/icons.py` | Toolbar icons drawn in code |
 | `src/offline_guard.py` | Blocks network access from Python code |
 
@@ -107,7 +109,7 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 ## Not implemented yet
 
 - **Document content:** OCR of scanned pages; digital signatures and certificate validation; Office and image conversion.
-- **Multi-file and collaboration:** batch processing across many files, Sets (multi-file drawing packages), and real-time collaboration (left out on purpose to keep the app offline).
+- **Multi-file and collaboration:** Sets (multi-file drawing packages) and real-time collaboration (left out on purpose to keep the app offline).
 - **Measurement:** separate scales for viewports within a page, and area cutouts.
 - **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.
 - **Standards:** PDF/A and PDF/X validation, and accessibility tagging.

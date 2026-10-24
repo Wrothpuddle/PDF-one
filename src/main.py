@@ -36,7 +36,7 @@ import report
 from recovery import RecoveryStore
 import pdf_operations as ops
 from canvas import PdfCanvas
-from dialogs import CalibrateDialog, FormDialog, ScaleDialog
+from dialogs import BatchDialog, CalibrateDialog, FormDialog, ScaleDialog
 from markups import KIND_LABELS, MEASURE_KINDS, Style, default_style
 from panels import (BookmarksPanel, LayersPanel, MarkupsList, PropertiesPanel, SearchPanel,
                     ThumbnailsPanel, ToolChestPanel, search_document)
@@ -410,6 +410,7 @@ class MainWindow(QMainWindow):
         tools.addAction(self.tool_actions["snapshot"])
         self._doc_menu_action(tools, "Compare Documents…", self._compare_documents)
         self._doc_menu_action(tools, "Overlay Pages…", self._overlay_pages)
+        tools.addAction(self._action("&Batch Process…", self._batch))
         tools.addSeparator()
         self._doc_menu_action(tools, "Fill Form Fields…", self._fill_form)
         self._doc_menu_action(tools, "Edit Existing Text…", self._edit_existing_text)
@@ -1849,6 +1850,36 @@ class MainWindow(QMainWindow):
                 url = QUrl(str(target)) if kind == "uri" else QUrl.fromLocalFile(
                     str((view.session.path.parent / str(target)).resolve()))
                 QDesktopServices.openUrl(url)
+
+    def _batch(self) -> None:
+        import batch
+        from PySide6.QtWidgets import QProgressDialog
+        dialog = BatchDialog(self._last_dir(), self)
+        view = self.view()
+        if view is not None and view.session.path not in self._temp_files:
+            dialog.add_files([str(view.session.path)])
+        if not dialog.exec():
+            return
+        paths, options = dialog.paths(), dialog.options()
+        options.author = self.user_name
+        progress = QProgressDialog("Processing…", "Stop", 0, len(paths), self)
+        progress.setWindowTitle("Batch process")
+        progress.setMinimumDuration(0)
+
+        def step(index: int, name: str) -> bool:
+            progress.setValue(index)
+            progress.setLabelText(f"Processing {name} ({index + 1} of {len(paths)})")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        results = batch.run_batch(paths, dialog.folder.text().strip(), options, step)
+        progress.setValue(len(paths))
+        failed = [result for result in results if not result.ok]
+        lines = [f"{'✔' if r.ok else '✘'} {r.source.name}: {r.message}" for r in results]
+        summary = (f"Processed {len(results) - len(failed)} of {len(paths)} file(s) into\n"
+                   f"{dialog.folder.text().strip()}\n\n" + "\n".join(lines[:30]))
+        (QMessageBox.warning if failed else QMessageBox.information)(
+            self, "Batch process", summary)
 
     def _auto_link(self) -> None:
         view = self.view()

@@ -215,3 +215,124 @@ class FormDialog(QDialog):
             if value != field["value"]:
                 result[field["name"]] = value
         return result
+
+
+class BatchDialog(QDialog):
+    """Choose files, actions, and an output folder for batch processing."""
+
+    def __init__(self, start_folder: str = "", parent=None) -> None:
+        from PySide6.QtWidgets import QFileDialog, QListWidget, QPushButton
+        super().__init__(parent)
+        self.setWindowTitle("Batch process PDFs")
+        self.resize(620, 560)
+        self._file_dialog = QFileDialog
+        self._start = start_folder
+        self.files = QListWidget()
+        add = QPushButton("Add PDFs…")
+        remove = QPushButton("Remove")
+        add.clicked.connect(self._add)
+        remove.clicked.connect(lambda: [self.files.takeItem(self.files.row(item))
+                                        for item in self.files.selectedItems()])
+        self.files.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        file_buttons = QHBoxLayout()
+        file_buttons.addWidget(add)
+        file_buttons.addWidget(remove)
+        file_buttons.addStretch(1)
+
+        self.scale = QComboBox()
+        self.scale.addItem("(leave unchanged)", "")
+        for name in COMMON_SCALES:
+            self.scale.addItem(name, name)
+        self.auto_link = QCheckBox("Auto-link sheet numbers")
+        self.stamp = QComboBox()
+        self.stamp.addItem("(no stamp)", "")
+        for name in markups.STAMPS:
+            self.stamp.addItem(name, name)
+        self.flatten = QCheckBox("Flatten markups")
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("leave empty for no password")
+        self.source_password = QLineEdit()
+        self.source_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.source_password.setPlaceholderText("for encrypted inputs")
+        self.summary = QCheckBox("Markup summary report (PDF)")
+        self.csv = QCheckBox("Markups list (CSV)")
+        self.folder = QLineEdit()
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.folder, 1)
+        folder_row.addWidget(browse)
+
+        form = QFormLayout()
+        form.addRow("Set scale on every page", self.scale)
+        form.addRow("", self.auto_link)
+        form.addRow("Stamp first page", self.stamp)
+        form.addRow("", self.flatten)
+        form.addRow("Protect outputs with", self.password)
+        form.addRow("Password of inputs", self.source_password)
+        form.addRow("Also write", self.summary)
+        form.addRow("", self.csv)
+        form.addRow("Output folder", folder_row)
+        self.error = QLabel("")
+        self.error.setStyleSheet("color:#b00020;")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Files"))
+        layout.addWidget(self.files, 1)
+        layout.addLayout(file_buttons)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Originals are never changed; results are written to the "
+                                "output folder."))
+        layout.addWidget(self.error)
+        layout.addWidget(buttons)
+
+    def add_files(self, paths: list[str]) -> None:
+        existing = {self.files.item(i).text() for i in range(self.files.count())}
+        for path in paths:
+            if path not in existing:
+                self.files.addItem(path)
+        if paths and not self.folder.text():
+            from pathlib import Path
+            self.folder.setText(str(Path(paths[0]).parent / "Batch output"))
+
+    def _add(self) -> None:
+        paths, _ = self._file_dialog.getOpenFileNames(self, "Add PDFs", self._start,
+                                                      "PDF files (*.pdf)")
+        self.add_files(paths)
+
+    def _browse(self) -> None:
+        folder = self._file_dialog.getExistingDirectory(self, "Output folder",
+                                                        self.folder.text() or self._start)
+        if folder:
+            self.folder.setText(folder)
+
+    def _accept(self) -> None:
+        if not self.paths():
+            self.error.setText("Add at least one PDF.")
+            return
+        if not self.folder.text().strip():
+            self.error.setText("Choose an output folder.")
+            return
+        options = self.options()
+        if not any((options.auto_link, options.stamp, options.scale, options.flatten,
+                    options.password, options.summary, options.csv)):
+            self.error.setText("Choose at least one action.")
+            return
+        self.accept()
+
+    def paths(self) -> list[str]:
+        return [self.files.item(i).text() for i in range(self.files.count())]
+
+    def options(self):
+        from batch import BatchOptions
+        return BatchOptions(auto_link=self.auto_link.isChecked(),
+                            stamp=self.stamp.currentData() or "",
+                            scale=self.scale.currentData() or "",
+                            flatten=self.flatten.isChecked(), password=self.password.text(),
+                            summary=self.summary.isChecked(), csv=self.csv.isChecked(),
+                            source_password=self.source_password.text())

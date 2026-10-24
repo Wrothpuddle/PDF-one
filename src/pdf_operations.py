@@ -38,7 +38,7 @@ def _check_page(doc: fitz.Document, index: int) -> None:
         raise IndexError("Page index is outside the document.")
 
 
-def _write_new(doc: fitz.Document, output: str | Path, password: str | None = None,
+def write_new(doc: fitz.Document, output: str | Path, password: str | None = None,
                sources: tuple[str | Path, ...] = ()) -> Path:
     output = Path(output).resolve()
     if output.suffix.lower() != ".pdf":
@@ -153,7 +153,7 @@ def extract_pages(doc: fitz.Document, indices: list[int], output: str | Path,
     try:
         for index in indices:
             new.insert_pdf(doc, from_page=index, to_page=index)
-        return _write_new(new, output, password, (source,) if source else ())
+        return write_new(new, output, password, (source,) if source else ())
     finally:
         new.close()
 
@@ -178,7 +178,7 @@ def merge_pdfs(sources: list[str | Path], output: str | Path) -> Path:
                 merged.insert_pdf(other)
             finally:
                 other.close()
-        return _write_new(merged, output, sources=tuple(sources))
+        return write_new(merged, output, sources=tuple(sources))
     finally:
         merged.close()
 
@@ -190,7 +190,7 @@ def protect_pdf(pdf_bytes: bytes, output: str | Path, password: str,
         raise ValueError("Choose a non-empty password.")
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        return _write_new(doc, output, password, (source,) if source else ())
+        return write_new(doc, output, password, (source,) if source else ())
     finally:
         doc.close()
 
