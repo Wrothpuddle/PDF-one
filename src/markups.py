@@ -19,6 +19,7 @@ PyMuPDF is AGPL-3.0-or-later or commercially licensed by Artifex.
 """
 from __future__ import annotations
 
+import html
 import json
 import math
 import re
@@ -95,6 +96,9 @@ class Style:
     font_size: float = 12.0
     text_color: str = "#000000"
     font: str = "Helv"
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
     align: str = "left"
     line_start: str = "none"
     line_end: str = "none"
@@ -231,6 +235,48 @@ def _font_name(style: Style) -> str:
     return style.font if style.font in FONTS else "Helv"
 
 
+_CSS_FONTS = {"Helv": "Helvetica,sans-serif", "Cour": "Courier,monospace",
+              "TiRo": "Times,serif"}
+
+
+def _rich_css(style: Style) -> str:
+    return (f"font-family:{_CSS_FONTS.get(style.font, _CSS_FONTS['Helv'])};"
+            f"font-size:{float(style.font_size):g}pt;color:{style.text_color or '#000000'};"
+            f"font-weight:{'bold' if style.bold else 'normal'};"
+            f"font-style:{'italic' if style.italic else 'normal'};"
+            f"text-decoration:{'underline' if style.underline else 'none'};"
+            f"text-align:{style.align if style.align in ('left', 'center', 'right', 'justify') else 'left'}")
+
+
+def _is_rich(doc: fitz.Document, xref: int) -> bool:
+    # Check /DS, not /RC: MuPDF drops /RC whenever /Contents is set, and the
+    # rich text is rewritten from /Contents + /DS on every change anyway.
+    return doc.xref_get_key(xref, "DS")[0] == "string" or \
+        doc.xref_get_key(xref, "RC")[0] == "string"
+
+
+def _write_rich(doc: fitz.Document, xref: int, text: str, style: Style) -> None:
+    """Store text as XHTML rich text (/RC) styled by the whole-box style (/DS)."""
+    css = _rich_css(style)
+    body = "<br/>".join(html.escape(line) for line in text.replace("\r\n", "\n").split("\n"))
+    rich = ('<?xml version="1.0"?><body xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/" '
+            f'xfa:APIVersion="Acrobat:8.0.0" xfa:spec="2.0.2" style="{css}"><p>{body}</p></body>')
+    doc.xref_set_key(xref, "RC", fitz.get_pdf_str(rich))
+    doc.xref_set_key(xref, "DS", fitz.get_pdf_str(css))
+
+
+def is_rich_text(page: fitz.Page, xref: int) -> bool:
+    """True for text boxes/callouts that support bold, italic, and a border colour."""
+    return get_annot(page, xref).type[0] == fitz.PDF_ANNOT_FREE_TEXT and \
+        _is_rich(page.parent, xref)
+
+
+def _parse_css(css: str) -> dict[str, str]:
+    return {key.strip().lower(): value.strip() for key, _sep, value in
+            (part.partition(":") for part in css.split(";")) if key.strip()}
+
+
 def _strip_callout(doc: fitz.Document, xref: int) -> None:
     """MuPDF adds a placeholder /CL to every FreeText; plain text boxes have none."""
     doc.xref_set_key(xref, "CL", "null")
@@ -279,11 +325,12 @@ def create_markup(page: fitz.Page, kind: str, points, style: Style | None = None
             raise ValueError("Text cannot be empty.")
         if rect.width < 18 or rect.height < 12:
             raise ValueError("Text box is too small. Drag a larger box on the page.")
+        # Rich text: MuPDF draws the border in the /DA colour and the words in
+        # the /DS colour, so text and border colours can differ.
         annot = page.add_freetext_annot(
-            rect, text, fontsize=style.font_size, fontname=_font_name(style),
-            text_color=hex_to_rgb(style.text_color) or (0, 0, 0), fill_color=fill,
+            rect, html.escape(text), richtext=True, style=_rich_css(style), fill_color=fill,
             border_width=style.width, dashes=DASHES.get(style.dash),
-            opacity=style.opacity, align=_align(style), rotate=page.rotation)
+            opacity=style.opacity, rotate=page.rotation)
     elif kind == "callout":
         if not text.strip():
             raise ValueError("Callout text cannot be empty.")
@@ -294,12 +341,11 @@ def create_markup(page: fitz.Page, kind: str, points, style: Style | None = None
         box &= page_bounds(page)
         knee = fitz.Point(box.x1 if anchor.x < tip.x else box.x0, (box.y0 + box.y1) / 2)
         annot = page.add_freetext_annot(
-            box, text, fontsize=style.font_size, fontname=_font_name(style),
-            text_color=hex_to_rgb(style.text_color) or (0, 0, 0), fill_color=fill,
+            box, html.escape(text), richtext=True, style=_rich_css(style), fill_color=fill,
             border_width=max(style.width, 0.5),
             dashes=DASHES.get(style.dash), callout=[tip, knee],
             line_end=LINE_ENDS.get(style.line_end, fitz.PDF_ANNOT_LE_OPEN_ARROW),
-            opacity=style.opacity, align=_align(style), rotate=page.rotation)
+            opacity=style.opacity, rotate=page.rotation)
     elif kind == "note":
         annot = page.add_text_annot(points[0], text or "", icon="Comment")
     elif kind in TEXT_MARKUP_KINDS:
@@ -351,6 +397,8 @@ def create_markup(page: fitz.Page, kind: str, points, style: Style | None = None
     annot.set_info(title=author or "", subject=style.subject or KIND_LABELS.get(kind, kind),
                    content=text if kind in ("note", "text", "callout") else "")
     xref = annot.xref
+    if kind in ("text", "callout"):
+        _write_rich(doc, xref, text, style)
     apply_style(page, xref, style)
     if kind in MEASURE_KINDS:
         refresh_measurement(page, xref)
@@ -414,7 +462,23 @@ def read_style(page: fitz.Page, xref: int) -> Style:
     names = {value: name for name, value in LINE_ENDS.items()}
     style.line_start, style.line_end = names.get(ends[0], "none"), names.get(ends[1], "none")
     style.subject = annot.info.get("subject", "") or style.subject
-    if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
+    if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT and _is_rich(doc, xref):
+        css = _parse_css(_get_string(doc, xref, "DS"))
+        _size, _font, border_colour = _parse_da(doc, xref)
+        style.stroke = border_colour
+        style.fill = rgb_to_hex(colors.get("stroke") or colors.get("fill"))  # PyMuPDF reports /C as stroke
+        size = re.match(r"[\d.]+", css.get("font-size", "12"))
+        style.font_size = float(size.group(0)) if size else 12.0
+        colour = css.get("color", "#000000")
+        style.text_color = colour if re.fullmatch(r"#[0-9a-fA-F]{6}", colour) else "#000000"
+        family = css.get("font-family", "").lower()
+        style.font = "Cour" if "courier" in family or "mono" in family else (
+            "TiRo" if "times" in family or family.startswith("serif") else "Helv")
+        style.bold = css.get("font-weight", "") in ("bold", "700", "800", "900")
+        style.italic = css.get("font-style", "") in ("italic", "oblique")
+        style.underline = "underline" in css.get("text-decoration", "")
+        style.align = css.get("text-align", "left")
+    elif annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
         size, font, colour = _parse_da(doc, xref)
         style.font_size, style.text_color = size, colour
         style.font = font if font in FONTS else "Helv"
@@ -445,6 +509,20 @@ def apply_style(page: fitz.Page, xref: int, style: Style) -> None:
         info["subject"] = style.subject
         annot.set_info(info)
 
+    if annot_type == fitz.PDF_ANNOT_FREE_TEXT and _is_rich(page.parent, xref):
+        doc = page.parent
+        annot.set_border(width=width, dashes=dashes or [])
+        annot.set_opacity(opacity)
+        if kind == "callout":
+            annot.set_line_ends(LINE_ENDS.get(style.line_end, 0), 0)
+        _write_rich(doc, xref, annot.info.get("content", ""), style)
+        if not fill:
+            doc.xref_set_key(xref, "C", "null")
+        annot = get_annot(page, xref)
+        annot.update(text_color=stroke or (0, 0, 0), fill_color=fill, rotate=page.rotation)
+        if kind != "callout":
+            _strip_callout(doc, xref)
+        return
     if annot_type == fitz.PDF_ANNOT_FREE_TEXT:
         annot.set_border(width=width, dashes=dashes or [])
         annot.set_opacity(opacity)

@@ -222,3 +222,36 @@ def test_style_round_trips_through_dict() -> None:
     assert Style.from_dict({**style.to_dict(), "unknown": 1}) == style
     with pytest.raises(ValueError):
         markups.hex_to_rgb("blue")
+
+
+def test_rich_text_box_formatting_round_trips(session: PdfSession) -> None:
+    style = default_style("text")
+    style.bold, style.italic, style.underline = True, True, True
+    style.text_color, style.stroke, style.fill = "#0000ff", "#ff0000", "#ffffcc"
+    style.font_size = 20
+    xref = session.apply("Text", lambda doc: create_markup(
+        doc[0], "text", [(100, 200), (400, 300)], style, text="Bold <note> &\nsecond"))
+    page = session.doc[0]
+    read = markups.read_style(page, xref)
+    assert (read.bold, read.italic, read.underline) == (True, True, True)
+    assert (read.text_color, read.stroke, read.fill) == ("#0000ff", "#ff0000", "#ffffcc")
+    assert read.font_size == pytest.approx(20)
+    assert page.load_annot(xref).info["content"] == "Bold <note> &\nsecond"
+    spans = [span for block in page.get_text("dict", clip=fitz.Rect(100, 200, 400, 300))["blocks"]
+             for line in block.get("lines", []) for span in line["spans"] if span["text"].strip()]
+    assert any("Bold <note> &" in span["text"] for span in spans)
+    assert all("Bold" in span["font"] and "Italic" in span["font"] for span in spans)
+    assert spans[0]["color"] == 0x0000FF
+    border = page.get_pixmap(dpi=288, clip=fitz.Rect(99, 240, 102, 260)).samples
+    assert any(border[i] > 200 and border[i + 1] < 80 for i in range(0, len(border), 3))
+    # Editing text and resizing keep the formatting.
+    session.apply("Edit", lambda doc: markups.set_text(doc[0], xref, "Changed"))
+    session.apply("Resize", lambda doc: markups.resize_markup(doc[0], xref,
+                                                              fitz.Rect(50, 150, 450, 320)))
+    page = session.doc[0]
+    again = markups.read_style(page, xref)
+    assert again.bold and again.text_color == "#0000ff"
+    assert tuple(markups.markup_bounds(page, xref)) == pytest.approx((50, 150, 450, 320), abs=0.5)
+    style.bold = False
+    session.apply("Unbold", lambda doc: markups.apply_style(doc[0], xref, style))
+    assert not markups.read_style(session.doc[0], xref).bold

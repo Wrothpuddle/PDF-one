@@ -99,7 +99,23 @@ class PropertiesPanel(QWidget):
         self.font_size.setSuffix(" pt")
         self.text_color = ColorButton()
         self.align = QComboBox()
-        self.align.addItems(["left", "center", "right"])
+        self.align.addItems(["left", "center", "right", "justify"])
+        self.bold = QToolButton()
+        self.italic = QToolButton()
+        self.underline = QToolButton()
+        format_row = QHBoxLayout()
+        for button, text, css, tip in ((self.bold, "B", "font-weight:700", "Bold"),
+                                       (self.italic, "I", "font-style:italic", "Italic"),
+                                       (self.underline, "U", "text-decoration:underline",
+                                        "Underline")):
+            button.setText(text)
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            button.setStyleSheet(f"QToolButton {{ {css}; min-width:26px; }}"
+                                 "QToolButton:checked { background:#cfe6f8; }")
+            button.toggled.connect(self._emit_style)
+            format_row.addWidget(button)
+        format_row.addStretch(1)
         self.stamp = QComboBox()
         self.stamp.addItems(STAMPS)
         self.comment = QPlainTextEdit()
@@ -121,7 +137,8 @@ class PropertiesPanel(QWidget):
                               ("Fill", self.fill), ("Line width", self.width),
                               ("Opacity", opacity_row), ("Line style", self.dash),
                               ("Start", self.line_start), ("End", self.line_end),
-                              ("Font", self.font), ("Font size", self.font_size),
+                              ("Font", self.font), ("Format", format_row),
+                              ("Font size", self.font_size),
                               ("Text colour", self.text_color), ("Align", self.align),
                               ("Stamp", self.stamp), ("Status", self.status),
                               ("Measurement", self.measurement)):
@@ -178,13 +195,14 @@ class PropertiesPanel(QWidget):
         lines = kind in ("line", "arrow", "polyline", "length", "polylength", "callout")
         shapes = kind not in ("note", "stamp", "highlight", "underline", "strikeout", "squiggly")
         visible = {
-            "Subject": True, "Line colour": kind != "stamp" and not text_kind,
+            "Subject": True, "Line colour": kind != "stamp",
             "Fill": kind in ("text", "callout", "rectangle", "ellipse", "polygon", "cloud",
                              "area", "count", "redact"),
             "Line width": shapes and kind != "count",
             "Opacity": True, "Line style": shapes and kind not in ("count", "pen", "highlighter"),
             "Start": lines and kind != "callout", "End": lines,
-            "Font": text_kind, "Font size": text_kind, "Text colour": text_kind,
+            "Font": text_kind, "Format": text_kind, "Font size": text_kind,
+            "Text colour": text_kind,
             "Align": text_kind, "Stamp": kind == "stamp", "Status": status is not None,
             "Measurement": bool(measurement),
         }
@@ -202,7 +220,11 @@ class PropertiesPanel(QWidget):
         self.font.setCurrentIndex(max(0, self.font.findData(style.font)))
         self.font_size.setValue(style.font_size)
         self.text_color.set_value(style.text_color)
-        self.align.setCurrentText(style.align if style.align in ("left", "center", "right") else "left")
+        self.align.setCurrentText(style.align if style.align in ("left", "center", "right",
+                                                                 "justify") else "left")
+        self.bold.setChecked(style.bold)
+        self.italic.setChecked(style.italic)
+        self.underline.setChecked(style.underline)
         self.stamp.setCurrentText(style.stamp)
         self.comment.setEnabled(comment is not None)
         self.comment.setPlainText(comment or "")
@@ -217,16 +239,15 @@ class PropertiesPanel(QWidget):
                      dash=self.dash.currentText(), font_size=self.font_size.value(),
                      text_color=self.text_color.value() or "#000000",
                      font=self.font.currentData() or "Helv", align=self.align.currentText(),
+                     bold=self.bold.isChecked(), italic=self.italic.isChecked(),
+                     underline=self.underline.isChecked(),
                      line_start=self.line_start.currentText(),
                      line_end=self.line_end.currentText(), stamp=self.stamp.currentText(),
                      subject=self.subject.text().strip())
 
     def _emit_style(self, *_args) -> None:
         if not self._loading and self.kind:
-            style = self.current_style()
-            if self.kind in ("text", "callout"):
-                style.stroke = style.text_color
-            self.styleEdited.emit(style)
+            self.styleEdited.emit(self.current_style())
 
     def _comment_changed(self) -> None:
         if not self._loading and self.comment.isEnabled():

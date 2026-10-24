@@ -1155,12 +1155,13 @@ class MainWindow(QMainWindow):
                     pdf_page = doc[page]
                     current = markups.read_style(pdf_page, xref)
                     kind = markups.markup_kind(pdf_page, pdf_page.load_annot(xref))
+                    applied = Style.from_dict(style.to_dict())
                     if len(selection) > 1:
                         # Multi-select changes colours/lines but keeps each one's own text.
-                        style.font_size, style.subject = current.font_size, current.subject
-                    if kind in ("text", "callout"):
-                        style.stroke = style.text_color
-                    markups.apply_style(pdf_page, xref, style)
+                        applied.font_size, applied.subject = current.font_size, current.subject
+                    if kind in ("text", "callout") and not markups.is_rich_text(pdf_page, xref):
+                        applied.stroke = applied.text_color  # plain text boxes: one colour
+                    markups.apply_style(pdf_page, xref, applied)
             self._apply(view, "Change Properties", apply)
         elif self.tool in KIND_LABELS:
             self.tool_styles[self.tool] = style

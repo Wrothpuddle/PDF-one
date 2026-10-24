@@ -12,7 +12,7 @@ Every markup is a real PDF annotation. It stays selectable and editable after sa
 - **Tool Lock** (Ctrl+L) keeps a tool active after each use; otherwise the app returns to Select and selects the new markup. Hold **Shift** or turn on **Ortho** (F8) to snap lines to 45° steps.
 
 ### Properties panel
-Shows the selected markup, or the active tool's defaults when nothing is selected. You can change the subject, line colour, fill, line width, opacity, line style (solid, dashed, or dotted), line ends, font (Helvetica, Courier, or Times), font size, text colour, alignment, stamp, status, and comment. Changes apply to every selected markup and can be undone.
+Shows the selected markup, or the active tool's defaults when nothing is selected. You can change the subject, line colour, fill, line width, opacity, line style (solid, dashed, or dotted), line ends, font (Helvetica, Courier, or Times), bold, italic, underline, font size, text colour (separate from the border colour), alignment, stamp, status, and comment. Changes apply to every selected markup and can be undone.
 
 ### Markups List
 A table of every markup in the document showing page, type, subject, comment, author, date, status, colour, and measurement. You can filter by text, type, or status, sort by any column, set the status (Accepted, Rejected, Completed, …), delete markups, and export the list to CSV. Clicking a row jumps to that markup. A totals line adds up measurements by subject (for example, total flooring area or the number of outlets counted).
@@ -109,5 +109,5 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 - **Document content:** OCR of scanned pages; digital signatures and certificate validation; Office and image conversion.
 - **Multi-file and collaboration:** batch processing across many files, Sets (multi-file drawing packages), and real-time collaboration (left out on purpose to keep the app offline).
 - **Measurement:** volume measurements, and separate scales for viewports within a page.
-- **Text:** rich-text formatting (bold, italic, underline) in text boxes, and paragraph reflow when editing existing text.
+- **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.
 - **Standards:** PDF/A and PDF/X validation, and accessibility tagging.
