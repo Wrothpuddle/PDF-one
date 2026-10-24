@@ -88,7 +88,7 @@ class TextPlacementEditor(QFrame):
 
     def _add_shortcuts(self) -> None:
         self.cancel_action = QAction("Cancel text placement", self)
-        self.cancel_action.setShortcut(Qt.Key.Key_Escape)
+        self.cancel_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
         self.cancel_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.addAction(self.cancel_action)
         self.commit_action = QAction("Place text", self)
@@ -490,6 +490,7 @@ class MainWindow(QMainWindow):
         self.text_toolbar = QToolBar("Text formatting", self)
         self.text_toolbar.setObjectName("TextFormattingToolbar")
         self.text_toolbar.setMovable(True)
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.text_toolbar)
         self.text_toolbar.addWidget(QLabel("Size", self.text_toolbar))
         self.text_size = QSpinBox(self.text_toolbar)
@@ -1574,6 +1575,36 @@ def self_test() -> int:
         after_fit_pan = view.pageNavigator().currentLocation()
         fit_pan_ok = (abs(after_fit_pan.x() - before_fit_pan.x()) > 0.01
                       or abs(after_fit_pan.y() - before_fit_pan.y()) > 0.01)
+
+        text_tab = window._active()
+        nav = text_tab.view.pageNavigator()
+        gesture = {
+            "kind": "text", "page": max(0, nav.currentPage()),
+            "start": (100.0, 100.0), "end": (300.0, 185.0),
+            "points": [(100.0, 100.0), (300.0, 185.0)],
+            "location": QPointF(nav.currentLocation()),
+            "zoom": max(float(nav.currentZoom()), 0.1),
+        }
+        window._begin_text_box(text_tab, gesture)
+        preview = window._text_editor
+        preview.text_edit.setPlainText("Visible preview\\nsecond line")
+        window.text_bold.setChecked(True)
+        app.processEvents()
+        initial_width = preview.width()
+        preview.resize(initial_width + 24, preview.height() + 16)
+        resize_ok = preview.width() == initial_width + 24
+        preview_ok = (preview.text_edit.toPlainText().startswith("Visible preview")
+                      and window.text_toolbar.isEnabled() and preview.isVisible())
+        window._commit_text_box()
+        app.processEvents()
+        placed_reader = PdfReader(str(text_tab.edit_session.working_path), strict=False)
+        placed_annots = placed_reader.pages[gesture["page"]].get("/Annots", [])
+        placed_text = any(
+            annot.get_object().get("/Subtype") == "/FreeText"
+            and annot.get_object().get("/RC") is not None for annot in placed_annots
+        )
+        text_box_ok = preview_ok and resize_ok and placed_text
+        text_tab.discard_edits()
         window.close()
 
         print("PDFium malformed-file smoke test:",
@@ -1583,7 +1614,9 @@ def self_test() -> int:
         print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
         print("Panning with fit-to-page scrollbars disabled:",
               "PASS" if fit_pan_ok else "FAIL")
-        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok else 1
+        print("Resizable live text box and formatted placement:",
+              "PASS" if text_box_ok else "FAIL")
+        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok and text_box_ok else 1
     finally:
         document.close()
         os.unlink(malformed_path)
