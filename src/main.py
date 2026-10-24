@@ -1241,6 +1241,19 @@ def self_test() -> int:
         view.mouseMoveEvent(FakeMouse(Qt.MouseButton.NoButton, 100, 120))
         pan_ok = scrollbar.value() == 380
         view.mouseReleaseEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 120))
+
+        view.setPageMode(QPdfView.PageMode.SinglePage)
+        view.setZoomMode(QPdfView.ZoomMode.FitInView)
+        app.processEvents()
+        view.horizontalScrollBar().setRange(0, 0)
+        view.verticalScrollBar().setRange(0, 0)
+        before_fit_pan = view.pageNavigator().currentLocation()
+        view.mousePressEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 100))
+        view.mouseMoveEvent(FakeMouse(Qt.MouseButton.NoButton, 150, 150))
+        view.mouseReleaseEvent(FakeMouse(Qt.MouseButton.MiddleButton, 150, 150))
+        after_fit_pan = view.pageNavigator().currentLocation()
+        fit_pan_ok = (abs(after_fit_pan.x() - before_fit_pan.x()) > 0.01
+                      or abs(after_fit_pan.y() - before_fit_pan.y()) > 0.01)
         window.close()
 
         print("PDFium malformed-file smoke test:",
@@ -1248,7 +1261,9 @@ def self_test() -> int:
         print("Task workspaces and movable tools panel:", "PASS" if ui_ok else "FAIL")
         print("Scroll-wheel zoom:", "PASS" if zoom_ok else "FAIL")
         print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
-        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok else 1
+        print("Panning with fit-to-page scrollbars disabled:",
+              "PASS" if fit_pan_ok else "FAIL")
+        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok else 1
     finally:
         document.close()
         os.unlink(malformed_path)
