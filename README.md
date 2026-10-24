@@ -81,9 +81,13 @@ To make a local executable, run the `pyinstaller` command in `.github/workflows/
 
 The program installs a Python audit hook before importing Qt. It rejects Python socket creation, URL requests, and HTTP client connections, and a regression test verifies this. The app does not import Qt Network, WebEngine, update, sharing, or telemetry modules. The guard cannot observe native sockets opened directly by a prebuilt library; the packaged dependency set is limited to Qt Core/Gui/Widgets and PyMuPDF.
 
+## License
+
+Northstar PDF is free software, licensed under the **GNU Affero General Public License v3.0 or later** (see [`LICENSE`](LICENSE)). You may use, study, share, and modify it. If you share a copy or a modified version, you must share it under the same license together with its complete source code. It comes with no warranty. Help → License in the app shows the full text, and the build download includes `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+
 ## Libraries and licenses
 
-- **PyMuPDF / MuPDF** (rendering and all PDF editing): AGPL-3.0-or-later, or a commercial license from Artifex. Under the AGPL, anyone you give the program to must also be able to get its complete source code. Publishing this repository publicly meets that requirement for the app's own code.
+- **PyMuPDF / MuPDF** (rendering and all PDF editing): AGPL-3.0-or-later, or a commercial license from Artifex. Its AGPL terms are why this app is AGPL too.
 - **PySide6 / Qt**: LGPLv3 (or GPL/commercial). Keep the Qt license notices with distributed builds.
 - **PyInstaller**: GPL with a bootloader exception, which allows bundling the app.
 

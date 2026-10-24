@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Tool Chest: reusable markup tools with saved properties, grouped in sets.
 
 Built-in sets give one tool per markup type plus common construction-review

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """In-memory session: undo/redo across journal and copy steps, save, encryption."""
 from pathlib import Path
 import sys

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Dockable panels: Properties, Markups List, Tool Chest, Thumbnails, Bookmarks,
 Layers, and Search."""
 from __future__ import annotations

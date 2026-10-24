@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """In-memory PDF document with undo/redo, used by every editing tool.
 
 The PDF is read once into memory, so the source file is never locked and can be

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Page, export, form, and redaction operations for Northstar PDF.
 
 Functions that take a ``doc`` change an open in-memory document and are meant

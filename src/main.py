@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Northstar PDF: an offline PDF markup, measurement, and review app for Windows.
 
 The workflow follows Bluebeam Revu: live markups you can select and restyle,
@@ -20,9 +22,10 @@ import pymupdf as fitz
 from PySide6.QtCore import QPointF, QSettings, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QColor, QGuiApplication,
                            QKeySequence, QPalette)
-from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog,
-                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSpinBox,
-                               QStyleFactory, QTabWidget, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
+                               QFileDialog, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
+                               QMessageBox, QPlainTextEdit, QSpinBox, QStyleFactory, QTabWidget,
+                               QToolBar, QVBoxLayout, QWidget)
 
 import compare
 import markups
@@ -38,6 +41,7 @@ from tool_chest import MY_TOOLS, ToolChest, ToolPreset
 APP_NAME = "Northstar PDF"
 APP_VERSION = "0.2.0"
 LAYOUT_VERSION = 2
+SOURCE_URL = "https://github.com/Wrothpuddle/PDF-one"
 
 MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout",
                 "pen", "highlighter", "line", "arrow", "polyline", "polygon", "cloud",
@@ -367,6 +371,7 @@ class MainWindow(QMainWindow):
 
         help_menu = bar.addMenu("&Help")
         help_menu.addAction(self._action("&Keyboard Shortcuts", self._show_shortcuts))
+        help_menu.addAction(self._action("&License", self._show_license))
         help_menu.addAction(self._action("&About", self._about))
 
     def _doc_menu_action(self, menu: QMenu, text: str, slot, shortcut=None) -> QAction:
@@ -1675,9 +1680,41 @@ class MainWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(self, f"About {APP_NAME}", (
             f"<b>{APP_NAME} {APP_VERSION}</b><br>Offline PDF markup, measurement, and review."
-            "<br><br>Built with PySide6 (Qt, LGPLv3) and PyMuPDF (AGPL-3.0-or-later)."
-            " Because PyMuPDF is AGPL-licensed, copies of this program must be shared with"
-            " their complete source code."))
+            "<br><br>Copyright © 2026 Northstar PDF contributors.<br>"
+            "This program is free software: you can redistribute it and/or modify it under the"
+            " terms of the GNU Affero General Public License, version 3 or (at your option) any"
+            " later version. It comes with ABSOLUTELY NO WARRANTY; see Help → License."
+            f'<br><br>Source code: <a href="{SOURCE_URL}">{SOURCE_URL}</a>'
+            "<br><br>Built with PySide6 (Qt, LGPLv3) and PyMuPDF (AGPL-3.0-or-later)."))
+
+    def _show_license(self) -> None:
+        text = read_bundled_text("LICENSE") or (
+            "The license file was not found. Northstar PDF is licensed under the GNU Affero "
+            f"General Public License v3.0 or later. See {SOURCE_URL}.")
+        notices = read_bundled_text("THIRD_PARTY_NOTICES.md")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("License")
+        dialog.resize(720, 620)
+        viewer = QPlainTextEdit(dialog)
+        viewer.setReadOnly(True)
+        viewer.setPlainText(text + ("\n\n" + "=" * 72 + "\n\n" + notices if notices else ""))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(viewer)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+
+def read_bundled_text(name: str) -> str:
+    """Read a file shipped next to the program (or inside the one-file build)."""
+    bases = [Path(getattr(sys, "_MEIPASS", "")), Path(sys.executable).parent,
+             Path(__file__).resolve().parent.parent]
+    for base in bases:
+        path = base / name
+        if str(base) and path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
 
 
 def parse_page_ranges(text: str, count: int) -> list[int]:
@@ -1875,6 +1912,8 @@ def self_test() -> int:
         checks.append(("Sharp render at high zoom", any(item.detail is not None or
                                                         item.base_scale >= canvas.zoom * 0.99
                                                         for item in canvas.pages if item.base)))
+        checks.append(("License text is bundled",
+                       "GNU AFFERO GENERAL PUBLIC LICENSE" in read_bundled_text("LICENSE")))
         checks.append(("No unexpected message boxes", not dialogs))
         for message in dialogs:
             print("Message box:", message)

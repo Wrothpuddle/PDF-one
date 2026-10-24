@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Live markups: create, restyle, move, reshape, hit-test, and list annotations.
 
 Every markup is a real PDF annotation with its own appearance, so it stays

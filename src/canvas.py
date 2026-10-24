@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Page canvas: renders PDF pages with PyMuPDF and handles every mouse tool.
 
 Scene units are PDF points of the *visible* (rotated, cropped) page, so the

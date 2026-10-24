@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Drawing revision review: page overlay and automatic difference clouds.
 
 Overlay renders two pages in grey and combines them so content only in the

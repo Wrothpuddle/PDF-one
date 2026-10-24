@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Page edits, exports, text replacement, forms, flattening, and redaction."""
 from pathlib import Path
 import sys

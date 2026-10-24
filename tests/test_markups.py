@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Live markup creation, editing, hit-testing, listing, and measurement."""
 from pathlib import Path
 import sys

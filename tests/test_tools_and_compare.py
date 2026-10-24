@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Tool Chest persistence, drawing compare/overlay, and input parsers."""
 from pathlib import Path
 import os
