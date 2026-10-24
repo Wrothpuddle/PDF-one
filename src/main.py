@@ -246,7 +246,7 @@ class InteractivePdfView(QPdfView):
             self._select_page = max(0, nav.currentPage())
             self._select_location = QPointF(nav.currentLocation())
             self._select_zoom = max(float(nav.currentZoom()), 0.1)
-            event.accept()
+            super().mousePressEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool != "select":
             point = event.position().toPoint()
@@ -298,7 +298,7 @@ class InteractivePdfView(QPdfView):
                 max(1, int(abs(point.x() - left))), max(1, int(abs(point.y() - top))),
             )
             self._selection_band.show()
-            event.accept()
+            super().mouseMoveEvent(event)
             return
         if self._draw_start is not None:
             raw = (float(point.x()), float(point.y()))
@@ -332,7 +332,7 @@ class InteractivePdfView(QPdfView):
                 "zoom": self._select_zoom,
             })
             self._select_start = None
-            event.accept()
+            super().mouseReleaseEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and self._draw_start is not None:
             end = event.position().toPoint()
