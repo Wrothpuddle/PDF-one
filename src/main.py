@@ -900,7 +900,6 @@ class MainWindow(QMainWindow):
                                  button.sizePolicy().verticalPolicy())
             button.setAccessibleName(label)
             button.setToolTip(action.toolTip() or action.text().replace("&", ""))
-            button.clicked.connect(action.trigger)
             self.tool_layout.addWidget(button)
         divider = QFrame(self.tool_content)
         divider.setFrameShape(QFrame.Shape.HLine)
