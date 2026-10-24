@@ -4,8 +4,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import fitz
 from pypdf import PdfReader, PdfWriter
 from edit_session import EditSession
+from pdf_operations import add_rich_text_box
 
 
 def make_pdf(path: Path, password: str | None = None) -> None:
@@ -97,5 +99,33 @@ def test_delete_is_pending_and_undoable(tmp_path: Path) -> None:
         session.redo()
         session.save()
         assert len(PdfReader(source).pages) == 1
+    finally:
+        session.cleanup()
+
+
+def test_moving_placed_text_box_replays_later_edits_and_is_undoable(tmp_path: Path) -> None:
+    source = tmp_path / "doc.pdf"
+    make_pdf(source)
+    session = EditSession(source)
+    try:
+        session.apply_operation(add_rich_text_box, 0, (40, 120, 300, 190),
+                                "Move this text", {"size": 13})
+        session.rotate(1, 90)
+        moved = (80, 220, 340, 290)
+        session.replace_operation(
+            1, add_rich_text_box, 0, moved, "Move this text", {"size": 13}
+        )
+        doc = fitz.open(session.working_path)
+        assert "Move this text" in doc[0].get_text()
+        span = next(span for block in doc[0].get_text("dict")["blocks"]
+                    for line in block.get("lines", []) for span in line["spans"]
+                    if "Move this text" in span["text"])
+        assert span["bbox"][0] >= 80
+        assert PdfReader(session.working_path).pages[1].get("/Rotate") == 90
+        doc.close()
+        session.undo()
+        assert "Move this text" in fitz.open(session.working_path)[0].get_text()
+        session.redo()
+        assert "Move this text" in fitz.open(session.working_path)[0].get_text()
     finally:
         session.cleanup()
