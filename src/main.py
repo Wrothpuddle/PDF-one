@@ -8,24 +8,93 @@ from pathlib import Path
 from offline_guard import install_offline_guard
 install_offline_guard()
 
-from pdf_operations import (add_pdf_annotation, extract_pages, extract_text_file,
-                            merge_pdfs, read_form_fields, split_pdf, protect_pdf,
-                            replace_existing_text)
+from pdf_operations import (add_pdf_annotation, add_rich_text_box, extract_pages,
+                            extract_text_file, merge_pdfs, read_form_fields,
+                            split_pdf, protect_pdf, replace_existing_text)
 from pypdf import PdfReader
 from edit_session import EditSession
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QSettings, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSettings, QTimer, Signal
+from PySide6.QtGui import (QAction, QKeySequence, QCloseEvent, QFont,
+                           QTextBlockFormat, QTextCharFormat, QTextCursor)
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
     QLineEdit, QListView, QMainWindow, QMessageBox, QSpinBox, QTabWidget,
     QToolBar, QTreeView, QWidget, QHBoxLayout, QVBoxLayout, QTabBar,
-    QToolButton, QScrollArea, QFrame, QRubberBand,
+    QToolButton, QScrollArea, QFrame, QRubberBand, QDoubleSpinBox,
+    QGridLayout, QTextEdit,
 )
 
 APP_NAME = "Northstar PDF"
+
+
+class ResizeCorner(QLabel):
+    """Drag handle that lets users resize the live text box in the page view."""
+
+    def __init__(self, editor: "TextPlacementEditor") -> None:
+        super().__init__("◢", editor)
+        self._origin = None
+        self._initial_size = None
+        self.setFixedSize(18, 18)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setStyleSheet("background:#2878d0;color:white;border:0;font-size:13px;")
+
+    def mousePressEvent(self, event) -> None:
+        self._origin = event.globalPosition().toPoint()
+        self._initial_size = self.parentWidget().size()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._origin is not None and self._initial_size is not None:
+            delta = event.globalPosition().toPoint() - self._origin
+            editor = self.parentWidget()
+            editor.resize(max(110, self._initial_size.width() + delta.x()),
+                          max(54, self._initial_size.height() + delta.y()))
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._origin = None
+        self._initial_size = None
+        event.accept()
+
+
+class TextPlacementEditor(QFrame):
+    """In-document live text preview with a draggable resize corner."""
+
+    def __init__(self, parent: QWidget, geometry: QRect) -> None:
+        super().__init__(parent)
+        self.setObjectName("TextPlacementEditor")
+        self.setGeometry(geometry)
+        self.setMinimumSize(110, 54)
+        self.setFrameShape(QFrame.Shape.Box)
+        self.setLineWidth(2)
+        self.setStyleSheet(
+            "QFrame#TextPlacementEditor { background:#ffffff; border:2px solid #2878d0; }"
+            "QTextEdit { background:#ffffff; color:#111111; border:0; padding:2px; }"
+        )
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setAcceptRichText(False)
+        self.text_edit.setPlaceholderText("Type your text here…")
+        self.text_edit.setAccessibleName("Text to place in PDF")
+        layout = QGridLayout(self)
+        layout.setContentsMargins(5, 4, 5, 5)
+        layout.addWidget(self.text_edit, 0, 0)
+        self.resize_corner = ResizeCorner(self)
+        layout.addWidget(self.resize_corner, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        self._add_shortcuts()
+
+    def _add_shortcuts(self) -> None:
+        self.cancel_action = QAction("Cancel text placement", self)
+        self.cancel_action.setShortcut(Qt.Key.Key_Escape)
+        self.cancel_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.addAction(self.cancel_action)
+        self.commit_action = QAction("Place text", self)
+        self.commit_action.setShortcut("Ctrl+Return")
+        self.commit_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.addAction(self.commit_action)
 
 
 class InteractivePdfView(QPdfView):
@@ -314,6 +383,9 @@ class MainWindow(QMainWindow):
         self.resize(1320, 860)
         self.settings = QSettings("Northstar", "NorthstarPDF")
         self.tool_actions: dict[str, QAction] = {}
+        self._text_editor: TextPlacementEditor | None = None
+        self._text_active_tab: PdfTab | None = None
+        self._text_context: dict | None = None
         self.tabs = QTabWidget(self)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
@@ -413,6 +485,80 @@ class MainWindow(QMainWindow):
         self.next_result = QAction("Next", self)
         self.next_result.triggered.connect(lambda: self._step_search(1))
         toolbar.addAction(self.next_result)
+
+        # Keep formatting controls visible so text can be styled while it is placed.
+        self.text_toolbar = QToolBar("Text formatting", self)
+        self.text_toolbar.setObjectName("TextFormattingToolbar")
+        self.text_toolbar.setMovable(True)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.text_toolbar)
+        self.text_toolbar.addWidget(QLabel("Size", self.text_toolbar))
+        self.text_size = QSpinBox(self.text_toolbar)
+        self.text_size.setRange(4, 144)
+        self.text_size.setValue(12)
+        self.text_size.setSuffix(" pt")
+        self.text_size.setToolTip("Text size in points")
+        self.text_toolbar.addWidget(self.text_size)
+        self.text_bold = QToolButton(self.text_toolbar)
+        self.text_bold.setText("B")
+        self.text_bold.setToolTip("Bold")
+        self.text_bold.setCheckable(True)
+        self.text_bold.setStyleSheet("font-weight:700")
+        self.text_toolbar.addWidget(self.text_bold)
+        self.text_italic = QToolButton(self.text_toolbar)
+        self.text_italic.setText("I")
+        self.text_italic.setToolTip("Italic")
+        self.text_italic.setCheckable(True)
+        self.text_italic.setStyleSheet("font-style:italic")
+        self.text_toolbar.addWidget(self.text_italic)
+        self.text_underline = QToolButton(self.text_toolbar)
+        self.text_underline.setText("U")
+        self.text_underline.setToolTip("Underline")
+        self.text_underline.setCheckable(True)
+        self.text_underline.setStyleSheet("text-decoration:underline")
+        self.text_toolbar.addWidget(self.text_underline)
+        self.text_toolbar.addSeparator()
+        self.text_toolbar.addWidget(QLabel("Letter spacing", self.text_toolbar))
+        self.text_letter_spacing = QDoubleSpinBox(self.text_toolbar)
+        self.text_letter_spacing.setRange(0, 20)
+        self.text_letter_spacing.setDecimals(1)
+        self.text_letter_spacing.setSingleStep(0.5)
+        self.text_letter_spacing.setSuffix(" pt")
+        self.text_letter_spacing.setToolTip("Spacing between characters")
+        self.text_toolbar.addWidget(self.text_letter_spacing)
+        self.text_toolbar.addWidget(QLabel("Line spacing", self.text_toolbar))
+        self.text_line_spacing = QDoubleSpinBox(self.text_toolbar)
+        self.text_line_spacing.setRange(0.5, 4)
+        self.text_line_spacing.setDecimals(1)
+        self.text_line_spacing.setSingleStep(0.1)
+        self.text_line_spacing.setValue(1.0)
+        self.text_line_spacing.setSuffix("×")
+        self.text_line_spacing.setToolTip("Line spacing multiplier")
+        self.text_toolbar.addWidget(self.text_line_spacing)
+        self.text_toolbar.addSeparator()
+        self.text_alignment = QComboBox(self.text_toolbar)
+        self.text_alignment.addItem("Left", "left")
+        self.text_alignment.addItem("Centered", "center")
+        self.text_alignment.addItem("Right", "right")
+        self.text_alignment.addItem("Justified", "justify")
+        self.text_alignment.setToolTip("Paragraph alignment")
+        self.text_toolbar.addWidget(self.text_alignment)
+        self.text_toolbar.addSeparator()
+        self.place_text_action = QAction("Place", self)
+        self.place_text_action.triggered.connect(self._commit_text_box)
+        self.text_toolbar.addAction(self.place_text_action)
+        self.cancel_text_action = QAction("Cancel", self)
+        self.cancel_text_action.triggered.connect(self._cancel_text_box)
+        self.text_toolbar.addAction(self.cancel_text_action)
+        for control in (self.text_size, self.text_bold, self.text_italic,
+                        self.text_underline, self.text_letter_spacing,
+                        self.text_line_spacing, self.text_alignment):
+            if isinstance(control, QSpinBox) or isinstance(control, QDoubleSpinBox):
+                control.valueChanged.connect(self._apply_text_style)
+            elif isinstance(control, QToolButton):
+                control.toggled.connect(self._apply_text_style)
+            else:
+                control.currentIndexChanged.connect(self._apply_text_style)
+        self.text_toolbar.setEnabled(False)
 
     def _make_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -1000,6 +1146,9 @@ class MainWindow(QMainWindow):
         if not tab:
             self.statusBar().showMessage("Open a PDF before selecting an annotation tool.", 4000)
             return
+        if self._text_editor is not None:
+            self.statusBar().showMessage("Place or cancel the active text box first.", 4000)
+            return
         tab.view.set_annotation_tool(kind)
         tab.view.setFocus()
         labels = {
@@ -1023,11 +1172,150 @@ class MainWindow(QMainWindow):
         y_from_top_left = min(float(page.height()), max(0.0, y_from_top_left))
         return float(box.left) + x_from_top_left, float(box.top) - y_from_top_left
 
+    def _begin_text_box(self, tab: PdfTab, gesture: dict) -> None:
+        start_x, start_y = gesture["start"]
+        end_x, end_y = gesture["end"]
+        left, top = min(start_x, end_x), min(start_y, end_y)
+        width, height = abs(end_x - start_x), abs(end_y - start_y)
+        if width < 48 or height < 28:
+            width, height = 230, 88
+        viewport = tab.view.viewport()
+        width = min(max(110, int(width)), max(110, viewport.width() - 8))
+        height = min(max(54, int(height)), max(54, viewport.height() - 8))
+        left = max(0, min(int(left), max(0, viewport.width() - width)))
+        top = max(0, min(int(top), max(0, viewport.height() - height)))
+        editor = TextPlacementEditor(viewport, QRect(left, top, width, height))
+        self._text_editor = editor
+        self._text_active_tab = tab
+        self._text_context = {
+            "page": int(gesture["page"]),
+            "location": QPointF(gesture["location"]),
+            "zoom": float(gesture["zoom"]),
+        }
+        editor.cancel_action.triggered.connect(self._cancel_text_box)
+        editor.commit_action.triggered.connect(self._commit_text_box)
+        editor.show()
+        editor.raise_()
+        self.text_toolbar.setEnabled(True)
+        self._apply_text_style()
+        editor.text_edit.setFocus()
+        self.statusBar().showMessage(
+            "Type in the outlined box · drag the blue corner to resize · Place or Ctrl+Enter to finish"
+        )
+
+    def _text_style(self) -> dict:
+        return {
+            "size": self.text_size.value(),
+            "bold": self.text_bold.isChecked(),
+            "italic": self.text_italic.isChecked(),
+            "underline": self.text_underline.isChecked(),
+            "letter_spacing": self.text_letter_spacing.value(),
+            "line_spacing": self.text_line_spacing.value(),
+            "alignment": self.text_alignment.currentData(),
+        }
+
+    def _apply_text_style(self, *_args) -> None:
+        editor = self._text_editor
+        if editor is None:
+            return
+        style = self._text_style()
+        font = QFont("Helvetica")
+        font.setPointSizeF(float(style["size"]))
+        font.setBold(bool(style["bold"]))
+        font.setItalic(bool(style["italic"]))
+        font.setUnderline(bool(style["underline"]))
+        char_format = QTextCharFormat()
+        char_format.setFont(font)
+        char_format.setFontLetterSpacing(float(style["letter_spacing"]))
+        block_format = QTextBlockFormat()
+        block_format.setLineHeight(
+            float(style["line_spacing"]) * 100.0,
+            QTextBlockFormat.LineHeightTypes.ProportionalHeight,
+        )
+        alignment = {
+            "left": Qt.AlignmentFlag.AlignLeft,
+            "center": Qt.AlignmentFlag.AlignHCenter,
+            "right": Qt.AlignmentFlag.AlignRight,
+            "justify": Qt.AlignmentFlag.AlignJustify,
+        }.get(style["alignment"], Qt.AlignmentFlag.AlignLeft)
+        block_format.setAlignment(alignment)
+        cursor = editor.text_edit.textCursor()
+        position = cursor.position()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.mergeCharFormat(char_format)
+        cursor.mergeBlockFormat(block_format)
+        cursor.clearSelection()
+        cursor.setPosition(min(position, editor.text_edit.document().characterCount() - 1))
+        editor.text_edit.setTextCursor(cursor)
+        editor.text_edit.setCurrentCharFormat(char_format)
+
+    def _cancel_text_box(self) -> None:
+        if self._text_editor is not None:
+            self._text_editor.deleteLater()
+        self._text_editor = None
+        self._text_active_tab = None
+        self._text_context = None
+        self.text_toolbar.setEnabled(False)
+        self.statusBar().showMessage("Text placement cancelled", 3000)
+
+    def _commit_text_box(self) -> None:
+        editor = self._text_editor
+        tab = self._text_active_tab
+        context = self._text_context
+        if editor is None or tab is None or context is None:
+            return
+        text = editor.text_edit.toPlainText()
+        if not text.strip():
+            self.statusBar().showMessage("Type some text before placing it", 4000)
+            editor.text_edit.setFocus()
+            return
+        geometry = editor.geometry()
+        view_rect = tab.view.viewport().rect()
+        left = max(0, min(geometry.left(), view_rect.right()))
+        top = max(0, min(geometry.top(), view_rect.bottom()))
+        right = max(left + 1, min(geometry.right(), view_rect.right()))
+        bottom = max(top + 1, min(geometry.bottom(), view_rect.bottom()))
+        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
+        if reader.is_encrypted and tab.password:
+            reader.decrypt(tab.password)
+        page_index = int(context["page"])
+        page_box = reader.pages[page_index].mediabox
+        top_left = self._viewport_to_pdf(
+            tab, page_index, (float(left), float(top)),
+            context["location"], context["zoom"], page_box
+        )
+        bottom_right = self._viewport_to_pdf(
+            tab, page_index, (float(right), float(bottom)),
+            context["location"], context["zoom"], page_box
+        )
+        pdf_rect = (top_left[0], bottom_right[1], bottom_right[0], top_left[1])
+        try:
+            tab.edit_session.apply_operation(
+                add_rich_text_box, page_index, pdf_rect, text, self._text_style(),
+                password=tab.password,
+            )
+            editor.deleteLater()
+            self._text_editor = None
+            self._text_active_tab = None
+            self._text_context = None
+            self.text_toolbar.setEnabled(False)
+            tab._reload_working_copy(page_index)
+            self._set_tab_modified(tab)
+            self.statusBar().showMessage(
+                "Formatted text placed · Ctrl+Z to undo · Ctrl+S to save", 5000
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not place text", str(exc))
+            editor.text_edit.setFocus()
+
     def _handle_annotation_gesture(self, tab: PdfTab, gesture: dict) -> None:
         if self.tabs.indexOf(tab) < 0:
             return
         kind = gesture["kind"]
         page = int(gesture["page"])
+        if kind == "text":
+            self._begin_text_box(tab, gesture)
+            return
         location = gesture["location"]
         zoom = float(gesture["zoom"])
         reader = PdfReader(str(tab.edit_session.working_path), strict=False)
