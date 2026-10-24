@@ -15,7 +15,7 @@ from pypdf import PdfReader
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSettings, QTimer, Signal
-from PySide6.QtGui import (QAction, QKeySequence, QCloseEvent, QFont,
+from PySide6.QtGui import (QAction, QKeySequence, QCloseEvent, QFont, QKeyEvent,
                            QTextBlockFormat, QTextCharFormat, QTextCursor)
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
@@ -1665,20 +1665,33 @@ def self_test() -> int:
         }
         window._begin_text_box(text_tab, gesture)
         preview = window._text_editor
-        preview.text_edit.setPlainText("Visible preview\\nsecond line")
+        preview.text_edit.setPlainText("Visible preview")
         window.text_bold.setChecked(True)
         app.processEvents()
         initial_width = preview.width()
         preview.resize(initial_width + 24, preview.height() + 16)
         resize_ok = preview.width() == initial_width + 24
-        preview_ok = (preview.text_edit.toPlainText().startswith("Visible preview")
-                      and window.text_toolbar.isEnabled() and preview.isVisible())
-        window._commit_text_box()
+        preview.text_edit.keyPressEvent(QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
+            Qt.KeyboardModifier.ControlModifier,
+        ))
+        newline_ok = preview.text_edit.toPlainText() == "Visible preview\\n"
+        preview.text_edit.insertPlainText("second line")
+        preview_ok = (newline_ok and window.text_toolbar.isEnabled()
+                      and preview.isVisible() and preview.move_handle.isVisible())
+        # Plain Enter places the text; Ctrl+Enter above inserted a line break.
+        preview.text_edit.keyPressEvent(QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
+            Qt.KeyboardModifier.NoModifier,
+        ))
         app.processEvents()
         placed_reader = PdfReader(str(text_tab.edit_session.working_path), strict=False)
         extracted = placed_reader.pages[gesture["page"]].extract_text() or ""
         placed_text = "Visible preview" in extracted and "second line" in extracted
-        text_box_ok = preview_ok and resize_ok and placed_text
+        text_tab.view.set_annotation_tool("text")
+        window._escape_to_pointer()
+        escape_ok = text_tab.view.annotation_tool is None
+        text_box_ok = preview_ok and resize_ok and placed_text and escape_ok
         text_tab.discard_edits()
         window.close()
 
@@ -1689,7 +1702,7 @@ def self_test() -> int:
         print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
         print("Panning with fit-to-page scrollbars disabled:",
               "PASS" if fit_pan_ok else "FAIL")
-        print("Resizable live text box and formatted placement:",
+        print("Enter places; Ctrl+Enter adds a line; Escape restores pointer:",
               "PASS" if text_box_ok else "FAIL")
         return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok and text_box_ok else 1
     finally:
