@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
 """Fail closed if Python code tries to open a network socket or URL request."""
 from __future__ import annotations
 import sys

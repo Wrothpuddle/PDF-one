@@ -1,0 +1,365 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Northstar PDF contributors
+"""Live markup creation, editing, hit-testing, listing, and measurement."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import pymupdf as fitz
+import pytest
+
+import markups
+from markups import Style, create_markup, default_style
+from pdf_document import PdfSession
+
+
+def make_pdf(path: Path, pages: int = 2, text: str = "Door schedule revised") -> None:
+    doc = fitz.open()
+    for _ in range(pages):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), text, fontsize=14)
+    doc.save(path)
+    doc.close()
+
+
+@pytest.fixture
+def session(tmp_path: Path):
+    source = tmp_path / "drawing.pdf"
+    make_pdf(source)
+    opened = PdfSession(source)
+    yield opened
+    opened.close()
+
+
+ALL_KINDS = {
+    "text": [(100, 200), (300, 260)], "callout": [(100, 300), (200, 260)],
+    "note": [(400, 400)], "highlight": [(70, 85), (250, 105)],
+    "underline": [(70, 85), (250, 105)], "strikeout": [(70, 85), (250, 105)],
+    "squiggly": [(70, 85), (250, 105)], "pen": [(50, 500), (60, 510), (80, 505)],
+    "highlighter": [(50, 520), (90, 520)], "line": [(50, 600), (150, 600)],
+    "arrow": [(50, 620), (150, 640)], "polyline": [(50, 650), (80, 680), (120, 650)],
+    "polygon": [(300, 500), (380, 500), (340, 560)], "cloud": [(400, 500), (480, 500), (440, 560)],
+    "rectangle": [(300, 600), (380, 660)], "ellipse": [(400, 600), (480, 660)],
+    "stamp": [(420, 100), (570, 145)], "redact": [(300, 700), (360, 730)],
+    "length": [(100, 720), (172, 720)], "polylength": [(100, 740), (172, 740), (172, 760)],
+    "area": [(450, 700), (522, 700), (522, 772), (450, 772)],
+    "perimeter": [(200, 700), (272, 700), (272, 772)], "count": [(30, 30)],
+    "angle": [(500, 300), (450, 300), (450, 250)],
+}
+
+
+def test_every_tool_creates_a_live_annotation(session: PdfSession) -> None:
+    def add_all(doc):
+        page = doc[0]
+        return {kind: create_markup(page, kind, points, text="Check this")
+                for kind, points in ALL_KINDS.items()}
+
+    xrefs = session.apply("Add markups", add_all)
+    page = session.doc[0]
+    rows = {row["xref"]: row for row in markups.list_markups(session.doc)}
+    for kind, xref in xrefs.items():
+        assert rows[xref]["kind"] == kind
+        assert rows[xref]["page"] == 0
+    # Markups are annotations only: nothing is burned into the page content.
+    assert b"Check this" not in page.read_contents()
+    highlight = page.load_annot(xrefs["highlight"])
+    assert highlight.rect.y0 < 100 < highlight.rect.y1
+    assert highlight.rect.width < 200  # snapped to the words, not the dragged box
+
+
+def test_markups_survive_save_and_reopen_and_stay_editable(session: PdfSession,
+                                                           tmp_path: Path) -> None:
+    xref = session.apply("Rectangle", lambda doc: create_markup(
+        doc[0], "rectangle", [(100, 100), (200, 150)], Style(stroke="#00ff00", width=3)))
+    session.save()
+    session.close()
+    reopened = PdfSession(tmp_path / "drawing.pdf")
+    try:
+        page = reopened.doc[0]
+        (row,) = markups.list_markups(reopened.doc)
+        assert row["kind"] == "rectangle" and row["color"] == "#00ff00"
+        reopened.apply("Move", lambda doc: markups.move_markup(doc[0], row["xref"], 50, 25))
+        page = reopened.doc[0]
+        assert tuple(markups.markup_bounds(page, row["xref"]).tl) == pytest.approx((149, 124), abs=1.5)
+    finally:
+        reopened.close()
+    assert xref
+
+
+def test_restyle_move_resize_and_undo(session: PdfSession) -> None:
+    xref = session.apply("Cloud", lambda doc: create_markup(
+        doc[0], "cloud", [(100, 100), (200, 100), (150, 180)]))
+    page = session.doc[0]
+    style = markups.read_style(page, xref)
+    assert style.stroke == "#e02020"
+    style.stroke, style.width, style.dash, style.fill = "#0000ff", 3, "dashed", "#ffff00"
+    session.apply("Style", lambda doc: markups.apply_style(doc[0], xref, style))
+    page = session.doc[0]
+    restyled = markups.read_style(page, xref)
+    assert (restyled.stroke, restyled.fill, restyled.dash) == ("#0000ff", "#ffff00", "dashed")
+    assert restyled.width == pytest.approx(3)
+    assert markups.markup_kind(page, page.load_annot(xref)) == "cloud"
+
+    session.apply("Move", lambda doc: markups.move_markup(doc[0], xref, 10, 20))
+    page = session.doc[0]
+    assert tuple(markups.markup_points(page, xref)[0]) == pytest.approx((110, 120), abs=0.01)
+    session.apply("Resize", lambda doc: markups.resize_markup(
+        doc[0], xref, fitz.Rect(0, 0, 200, 160)))
+    page = session.doc[0]
+    assert tuple(markups.markup_bounds(page, xref)) == pytest.approx((0, 0, 200, 160), abs=0.01)
+
+    session.undo()
+    session.undo()
+    page = session.doc[0]
+    assert tuple(markups.markup_points(page, xref)[0]) == pytest.approx((100, 100), abs=0.01)
+    session.undo()
+    session.undo()
+    assert not list(session.doc[0].annots())
+    assert not session.dirty
+    session.redo()
+    assert len(list(session.doc[0].annots())) == 1
+
+
+def test_text_box_edit_resize_and_style(session: PdfSession) -> None:
+    style = default_style("text")
+    style.font_size, style.font, style.align = 18, "TiRo", "center"
+    xref = session.apply("Text", lambda doc: create_markup(
+        doc[0], "text", [(100, 200), (320, 260)], style, text="First"))
+    session.apply("Edit", lambda doc: markups.set_text(doc[0], xref, "Second\nline"))
+    session.apply("Resize", lambda doc: markups.resize_markup(
+        doc[0], xref, fitz.Rect(100, 200, 400, 300)))
+    page = session.doc[0]
+    annot = page.load_annot(xref)
+    assert annot.info["content"] == "Second\nline"
+    assert tuple(annot.rect) == pytest.approx((100, 200, 400, 300), abs=0.5)
+    read = markups.read_style(page, xref)
+    assert read.font_size == pytest.approx(18)
+    assert read.font == "TiRo" and read.align == "center"
+    assert tuple(markups.markup_bounds(page, xref)) == pytest.approx((100, 200, 400, 300), abs=0.5)
+    pixmap = page.get_pixmap(clip=fitz.Rect(100, 200, 400, 300))
+    assert any(value < 128 for value in pixmap.samples)
+
+
+def test_hit_testing_and_box_selection(session: PdfSession) -> None:
+    def add(doc):
+        page = doc[0]
+        return (create_markup(page, "line", [(100, 100), (300, 100)]),
+                create_markup(page, "rectangle", [(100, 300), (200, 400)]),
+                create_markup(page, "polygon", [(400, 400), (500, 400), (450, 500)]))
+
+    line, rect, polygon = session.apply("Add", add)
+    page = session.doc[0]
+    assert markups.markup_at(page, (200, 102)) == line
+    assert markups.markup_at(page, (200, 120)) is None
+    assert markups.markup_at(page, (150, 350)) == rect
+    assert markups.markup_at(page, (450, 430)) == polygon
+    assert set(markups.markups_in_rect(page, fitz.Rect(90, 90, 310, 410))) == {line, rect}
+
+
+def test_markups_on_rotated_page_use_unrotated_coordinates(session: PdfSession) -> None:
+    session.apply("Rotate", lambda doc: doc[0].set_rotation(90))
+    page = session.doc[0]
+    visual = fitz.Point(50, 60)  # on screen, top-left area of the rotated page
+    unrotated = visual * page.derotation_matrix
+    xref = session.apply("Rect", lambda doc: create_markup(
+        doc[0], "rectangle", [unrotated, unrotated + (40, 40)]))
+    page = session.doc[0]
+    assert markups.markup_at(page, unrotated + (20, 20)) == xref
+    shown = page.load_annot(xref).rect * page.rotation_matrix
+    assert shown.contains(visual + (1, 1)) or shown.contains(visual + (-1, 1))
+
+
+def test_measurements_use_page_scale_and_update_when_moved(session: PdfSession) -> None:
+    scale = markups.common_scale('1/4" = 1\'-0"')
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], scale))
+    # 1/4" = 72/4 = 18 points per foot, so 180 points is 10 feet.
+    xref = session.apply("Length", lambda doc: create_markup(
+        doc[0], "length", [(100, 100), (280, 100)]))
+    page = session.doc[0]
+    value, label = markups.measurement(page, xref)
+    assert value == pytest.approx(10)
+    assert label == "10'-0\""
+    assert page.load_annot(xref).info["content"] == label
+    area = session.apply("Area", lambda doc: create_markup(
+        doc[0], "area", [(100, 200), (136, 200), (136, 236), (100, 236)]))
+    assert markups.measurement(session.doc[0], area)[1] == "4.00 sq ft"
+    session.apply("Stretch", lambda doc: markups.set_markup_points(
+        doc[0], xref, [(100, 100), (109, 100)]))
+    assert markups.measurement(session.doc[0], xref)[1] == "0'-6\""
+    calibrated = markups.scale_from_calibration(100, 5, "m")
+    session.apply("Calibrate", lambda doc: markups.set_page_scale(doc[0], calibrated))
+    assert markups.measurement(session.doc[0], xref)[0] == pytest.approx(0.45)
+    angle = session.apply("Angle", lambda doc: create_markup(
+        doc[0], "angle", [(200, 300), (100, 300), (100, 200)]))
+    assert markups.measurement(session.doc[0], angle)[1] == "90.0°"
+    totals = markups.measurement_totals(markups.list_markups(session.doc))
+    assert totals["Length"][1] == 1
+
+
+def test_feet_inch_formatting() -> None:
+    assert markups.format_length(12.5, "ft-in") == "12'-6\""
+    assert markups.format_length(1 + 1 / 96, "ft-in") == "1'-0 1/8\""
+    assert markups.format_length(2.345, "m") == "2.35 m"
+
+
+def test_status_author_duplicate_and_csv(session: PdfSession, tmp_path: Path) -> None:
+    xref = session.apply("Rect", lambda doc: create_markup(
+        doc[0], "rectangle", [(100, 100), (150, 150)], author="Reviewer"))
+    session.apply("Status", lambda doc: markups.set_status(doc[0], xref, "Accepted"))
+    copy = session.apply("Copy", lambda doc: markups.duplicate_markup(doc[0], xref, target=doc[1]))
+    rows = markups.list_markups(session.doc)
+    assert [(row["page"], row["status"], row["author"]) for row in rows] == [
+        (0, "Accepted", "Reviewer"), (1, "Accepted", "Reviewer")]
+    assert rows[1]["xref"] == copy
+    output = tmp_path / "markups.csv"
+    markups.export_markups_csv(rows, output)
+    assert "Accepted" in output.read_text(encoding="utf-8")
+
+
+def test_style_round_trips_through_dict() -> None:
+    style = Style(stroke="#123456", width=4, dash="dotted", stamp="Draft")
+    assert Style.from_dict({**style.to_dict(), "unknown": 1}) == style
+    with pytest.raises(ValueError):
+        markups.hex_to_rgb("blue")
+
+
+def test_rich_text_box_formatting_round_trips(session: PdfSession) -> None:
+    style = default_style("text")
+    style.bold, style.italic, style.underline = True, True, True
+    style.text_color, style.stroke, style.fill = "#0000ff", "#ff0000", "#ffffcc"
+    style.font_size = 20
+    xref = session.apply("Text", lambda doc: create_markup(
+        doc[0], "text", [(100, 200), (400, 300)], style, text="Bold <note> &\nsecond"))
+    page = session.doc[0]
+    read = markups.read_style(page, xref)
+    assert (read.bold, read.italic, read.underline) == (True, True, True)
+    assert (read.text_color, read.stroke, read.fill) == ("#0000ff", "#ff0000", "#ffffcc")
+    assert read.font_size == pytest.approx(20)
+    assert page.load_annot(xref).info["content"] == "Bold <note> &\nsecond"
+    spans = [span for block in page.get_text("dict", clip=fitz.Rect(100, 200, 400, 300))["blocks"]
+             for line in block.get("lines", []) for span in line["spans"] if span["text"].strip()]
+    assert any("Bold <note> &" in span["text"] for span in spans)
+    assert all("Bold" in span["font"] and "Italic" in span["font"] for span in spans)
+    assert spans[0]["color"] == 0x0000FF
+    border = page.get_pixmap(dpi=288, clip=fitz.Rect(99, 240, 102, 260)).samples
+    assert any(border[i] > 200 and border[i + 1] < 80 for i in range(0, len(border), 3))
+    # Editing text and resizing keep the formatting.
+    session.apply("Edit", lambda doc: markups.set_text(doc[0], xref, "Changed"))
+    session.apply("Resize", lambda doc: markups.resize_markup(doc[0], xref,
+                                                              fitz.Rect(50, 150, 450, 320)))
+    page = session.doc[0]
+    again = markups.read_style(page, xref)
+    assert again.bold and again.text_color == "#0000ff"
+    assert tuple(markups.markup_bounds(page, xref)) == pytest.approx((50, 150, 450, 320), abs=0.5)
+    style.bold = False
+    session.apply("Unbold", lambda doc: markups.apply_style(doc[0], xref, style))
+    assert not markups.read_style(session.doc[0], xref).bold
+
+
+def test_volume_and_image_stamps(session: PdfSession, tmp_path: Path) -> None:
+    scale = markups.common_scale('1/4" = 1\'-0"')
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], scale))
+    style = default_style("volume")
+    style.depth = 0.5
+    volume = session.apply("Volume", lambda doc: create_markup(
+        doc[0], "volume", [(100, 100), (136, 100), (136, 136), (100, 136)], style))
+    value, label = markups.measurement(session.doc[0], volume)
+    assert value == pytest.approx(2.0) and label.startswith("2.00 cu ft")
+    rows = markups.list_markups(session.doc)
+    assert markups.measurement_summary(rows) == [("Volume", markups.format_volume(2.0, "ft"), 1)]
+
+    picture = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 30), False)
+    picture.set_rect(picture.irect, (200, 0, 0))
+    path = tmp_path / "signature.png"
+    path.write_bytes(picture.tobytes("png"))
+    image_style = default_style("image")
+    image_style.image = str(path)
+    stamp = session.apply("Image", lambda doc: create_markup(
+        doc[0], "image", [(300, 300), (300, 300)], image_style))
+    page = session.doc[0]
+    assert tuple(page.load_annot(stamp).rect) == pytest.approx((300, 300, 450, 375))
+    copy = session.apply("Copy", lambda doc: markups.duplicate_markup(doc[0], stamp, target=doc[1]))
+    page = session.doc[1]
+    samples = page.get_pixmap(clip=page.load_annot(copy).rect).samples
+    assert sum(1 for i in range(0, len(samples), 3) if samples[i] > 150 and samples[i + 1] < 60) > 1000
+    with pytest.raises(ValueError):
+        create_markup(session.doc[0], "image", [(10, 10)], default_style("image"))
+
+
+def test_reply_threads(session: PdfSession, tmp_path: Path) -> None:
+    import report
+
+    xref = session.apply("Cloud", lambda doc: create_markup(
+        doc[0], "cloud", [(100, 100), (200, 100), (150, 180)], author="Pat", text=""))
+    session.apply("Reply 1", lambda doc: markups.add_reply(doc[0], xref, "Is this the new wall?", "Sam"))
+    session.apply("Reply 2", lambda doc: markups.add_reply(doc[0], xref, "Yes, per RFI 12", "Pat"))
+    page = session.doc[0]
+    thread = markups.replies(page, xref)
+    assert [(r["author"], r["text"]) for r in thread] == [
+        ("Sam", "Is this the new wall?"), ("Pat", "Yes, per RFI 12")]
+    assert all(r["date"] for r in thread)
+    rows = markups.list_markups(session.doc)
+    assert len(rows) == 1 and rows[0]["replies"] == 2  # replies are not separate rows
+    assert markups.markup_at(page, (150, 105)) == xref
+    output = report.write_summary(session.doc, tmp_path / "s.pdf", "t", rows)
+    with fitz.open(output) as result:
+        assert "Yes, per RFI 12" in "".join(p.get_text() for p in result)
+    session.apply("Delete", lambda doc: markups.delete_markup(doc[0], xref))
+    assert not list(session.doc[0].annots())  # replies go with their markup
+    line = session.apply("Line", lambda doc: create_markup(doc[1], "line", [(1, 1), (50, 50)]))
+    with pytest.raises(ValueError):
+        session.apply("Empty reply", lambda doc: markups.add_reply(doc[1], line, "  "))
+
+
+def test_area_cutouts(session: PdfSession) -> None:
+    scale = markups.common_scale('1/4" = 1\'-0"')  # 18 pt per foot
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], scale))
+    area = session.apply("Area", lambda doc: create_markup(
+        doc[0], "area", [(100, 100), (280, 100), (280, 280), (100, 280)]))  # 10 x 10 ft
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(100)
+    cut = session.apply("Cutout", lambda doc: markups.add_cutout(
+        doc[0], area, [(118, 118), (154, 118), (154, 154), (118, 154)]))  # 2 x 2 ft
+    page = session.doc[0]
+    assert markups.measurement(page, area)[0] == pytest.approx(96)
+    assert page.load_annot(area).info["content"] == "96.00 sq ft"
+    assert [row["kind"] for row in markups.list_markups(session.doc)] == ["area"]
+    session.apply("Grow", lambda doc: markups.set_markup_points(
+        doc[0], cut, [(118, 118), (172, 118), (172, 154), (118, 154)]))  # 3 x 2 ft
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(94)
+    session.apply("Move", lambda doc: markups.move_markup(doc[0], area, 10, 0))
+    assert markups.markup_points(session.doc[0], cut)[0].x == pytest.approx(128)
+    session.apply("Scale 2", lambda doc: markups.set_page_scale(doc[1], scale))
+    copy = session.apply("Copy", lambda doc: markups.duplicate_markup(doc[0], area, target=doc[1]))
+    assert markups.measurement(session.doc[1], copy)[0] == pytest.approx(94)
+    session.apply("Delete cut", lambda doc: markups.delete_markup(doc[0], cut))
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(100)
+    session.undo()
+    session.apply("Delete area", lambda doc: markups.delete_markup(doc[0], area))
+    assert not list(session.doc[0].annots())
+    line = session.apply("Line", lambda doc: create_markup(doc[0], "line", [(1, 1), (9, 9)]))
+    with pytest.raises(ValueError):
+        session.apply("Bad", lambda doc: markups.add_cutout(doc[0], line, [(1, 1), (5, 1), (5, 5)]))
+
+
+def test_viewport_scales(session: PdfSession) -> None:
+    page_scale = markups.common_scale('1/4" = 1\'-0"')        # 18 pt per foot
+    detail_scale = markups.common_scale('1" = 1\'-0"')        # 72 pt per foot
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], page_scale))
+    plan = session.apply("Plan", lambda doc: create_markup(doc[0], "length",
+                                                            [(50, 50), (122, 50)]))
+    detail = session.apply("Detail", lambda doc: create_markup(doc[0], "length",
+                                                                [(350, 450), (422, 450)]))
+    assert markups.measurement(session.doc[0], detail)[1] == "4'-0\""
+    session.apply("Viewport", lambda doc: markups.add_viewport(
+        doc[0], fitz.Rect(300, 400, 600, 700), detail_scale, "Detail 3"))
+    page = session.doc[0]
+    assert markups.measurement(page, plan)[1] == "4'-0\""     # outside: page scale
+    assert markups.measurement(page, detail)[1] == "1'-0\""   # inside: viewport scale
+    assert page.load_annot(detail).info["content"] == "1'-0\""
+    (viewport,) = markups.viewports(page)
+    assert viewport["name"] == "Detail 3" and viewport["scale"].label == '1" = 1\'-0"'
+    session.apply("Clear", lambda doc: markups.set_viewports(doc[0], []))
+    assert markups.measurement(session.doc[0], detail)[1] == "4'-0\""
+    session.undo()
+    assert markups.measurement(session.doc[0], detail)[1] == "1'-0\""

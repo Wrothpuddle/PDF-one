@@ -3,6 +3,7 @@ name: Build Windows app
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -22,30 +23,48 @@ jobs:
           cache: pip
       - name: Install local build dependencies
         run: python -m pip install -r requirements.txt pyinstaller pytest
-      - name: Run offline guard tests
+      - name: Download OCR language data
+        run: python tools/get_tessdata.py eng
+      - name: Run unit tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+      - name: Run app self-test from source
+        timeout-minutes: 5
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python src/main.py --self-test
       - name: Package standalone executable
         run: >-
           pyinstaller --noconfirm --clean --windowed --onefile
           --name NorthstarPDF
-          --collect-all PySide6.QtPdf
-          --collect-all PySide6.QtPdfWidgets
-          --collect-all cryptography
+          --paths src
+          --add-data "LICENSE:."
+          --add-data "THIRD_PARTY_NOTICES.md:."
+          --add-data "tessdata:tessdata"
           --collect-all pymupdf
-          --hidden-import fitz
-          --hidden-import PySide6.QtPdf
-          --hidden-import PySide6.QtPdfWidgets
+          --hidden-import PySide6.QtTest
           src/main.py
       - name: Smoke test packaged executable
+        timeout-minutes: 5
         env:
           QT_QPA_PLATFORM: offscreen
-        run: .\dist\NorthstarPDF.exe --self-test
+        shell: pwsh
+        # A windowed executable does not block PowerShell or report its exit
+        # code unless it is started with -Wait -PassThru.
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "northstar-self-test.txt"
+          $env:NORTHSTAR_SELF_TEST_REPORT = $report
+          $process = Start-Process -FilePath .\dist\NorthstarPDF.exe -ArgumentList "--self-test" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($process.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($process.ExitCode)" }
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: NorthstarPDF-Windows
-          path: dist/NorthstarPDF.exe
+          path: |
+            dist/NorthstarPDF.exe
+            LICENSE
+            THIRD_PARTY_NOTICES.md
           if-no-files-found: error
           retention-days: 30
