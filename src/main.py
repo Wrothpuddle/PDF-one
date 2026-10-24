@@ -19,7 +19,7 @@ from offline_guard import install_offline_guard
 install_offline_guard()
 
 import pymupdf as fitz
-from PySide6.QtCore import QPointF, QSettings, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QPointF, QSettings, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QColor, QGuiApplication,
                            QKeySequence, QPalette)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
                                QToolBar, QVBoxLayout, QWidget)
 
 import compare
+import icons
 import markups
 import printing
 import pdf_operations as ops
@@ -41,7 +42,7 @@ from tool_chest import MY_TOOLS, ToolChest, ToolPreset
 
 APP_NAME = "Northstar PDF"
 APP_VERSION = "0.2.0"
-LAYOUT_VERSION = 2
+LAYOUT_VERSION = 3
 SOURCE_URL = "https://github.com/Wrothpuddle/PDF-one"
 
 MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout",
@@ -121,6 +122,8 @@ class MainWindow(QMainWindow):
         self._make_menus()
         self._make_toolbars()
         self._make_status_bar()
+        self._apply_icons()
+        self._set_tool_labels(self.labels_action.isChecked())
         self.tabs.currentChanged.connect(self._tab_changed)
         geometry = self.settings.value("windowGeometry")
         state = self.settings.value("windowState")
@@ -336,6 +339,11 @@ class MainWindow(QMainWindow):
                      self.chest_dock, self.search_dock, self.markups_dock):
             panels.addAction(dock.toggleViewAction())
         self.toolbars_menu = view.addMenu("&Toolbars")
+        self.labels_action = self._action("Show Tool &Labels", self._set_tool_labels,
+                                          checkable=True)
+        self.labels_action.setChecked(self.settings.value("toolLabels", False, type=bool))
+        view.addAction(self.labels_action)
+        self._toolbars: list[QToolBar] = []
 
         document = bar.addMenu("&Document")
         for text, slot, key in (
@@ -405,10 +413,37 @@ class MainWindow(QMainWindow):
     def _toolbar(self, title: str, name: str) -> QToolBar:
         toolbar = QToolBar(title, self)
         toolbar.setObjectName(name)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        toolbar.setIconSize(QSize(22, 22))
+        self._toolbars.append(toolbar)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.toolbars_menu.addAction(toolbar.toggleViewAction())
         return toolbar
+
+    def _action_icons(self) -> dict[QAction, str]:
+        named = {self.open_action: "open", self.save_action: "save", self.print_action: "print",
+                 self.undo_action: "undo", self.redo_action: "redo",
+                 self.zoom_in_action: "zoom_in", self.zoom_out_action: "zoom_out",
+                 self.fit_width_action: "fit_width", self.fit_page_action: "fit_page",
+                 self.prev_page_action: "prev_page", self.next_page_action: "next_page",
+                 self.lock_action: "lock", self.snap_action: "snap"}
+        named.update({action: kind for kind, action in self.tool_actions.items()})
+        return named
+
+    def _apply_icons(self) -> None:
+        """(Re)draw icons in the current theme's text colour."""
+        foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        for action, name in self._action_icons().items():
+            action.setIcon(icons.make_icon(name, foreground))
+            shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            label = action.text().replace("&", "")
+            action.setToolTip(f"{label} ({shortcut})" if shortcut else label)
+
+    def _set_tool_labels(self, show: bool) -> None:
+        self.settings.setValue("toolLabels", show)
+        style = (Qt.ToolButtonStyle.ToolButtonTextBesideIcon if show
+                 else Qt.ToolButtonStyle.ToolButtonIconOnly)
+        for toolbar in self._toolbars:
+            toolbar.setToolButtonStyle(style)
 
     def _make_toolbars(self) -> None:
         main = self._toolbar("File", "FileToolbar")
@@ -447,7 +482,6 @@ class MainWindow(QMainWindow):
             tools.addAction(self.tool_actions[kind])
         tools.addSeparator()
         tools.addAction(self.lock_action)
-        self.addToolBarBreak()
         measure = self._toolbar("Measure", "MeasureToolbar")
         measure.setStyleSheet(tools.styleSheet())
         measure.addAction(self.tool_actions["calibrate"])
@@ -867,6 +901,7 @@ class MainWindow(QMainWindow):
         app.setStyle(QStyleFactory.create("Fusion"))
         if not enabled:
             app.setPalette(app.style().standardPalette())
+            self._apply_icons()
             return
         palette = QPalette()
         for role, colour in ((QPalette.ColorRole.Window, "#2b2d31"),
@@ -882,6 +917,7 @@ class MainWindow(QMainWindow):
                              (QPalette.ColorRole.ToolTipText, "#e7e8ea")):
             palette.setColor(role, QColor(colour))
         app.setPalette(palette)
+        self._apply_icons()
 
     # -- tools ------------------------------------------------------------------------
     def set_tool(self, kind: str, style: Style | None = None) -> None:
