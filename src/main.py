@@ -1671,6 +1671,22 @@ def self_test() -> int:
         initial_width = preview.width()
         preview.resize(initial_width + 24, preview.height() + 16)
         resize_ok = preview.width() == initial_width + 24
+
+        class FakeDrag:
+            def __init__(self, x, y):
+                self._point = QPointF(x, y)
+            def button(self):
+                return Qt.MouseButton.LeftButton
+            def globalPosition(self):
+                return self._point
+            def accept(self):
+                pass
+
+        before_move = preview.pos()
+        preview.move_handle.mousePressEvent(FakeDrag(10, 10))
+        preview.move_handle.mouseMoveEvent(FakeDrag(34, 28))
+        preview.move_handle.mouseReleaseEvent(FakeDrag(34, 28))
+        move_ok = preview.pos() != before_move and preview.text_edit.toPlainText() == "Visible preview"
         preview.text_edit.moveCursor(QTextCursor.MoveOperation.End)
         preview.text_edit.keyPressEvent(QKeyEvent(
             QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
@@ -1678,7 +1694,7 @@ def self_test() -> int:
         ))
         newline_ok = preview.text_edit.toPlainText() == "Visible preview\\n"
         preview.text_edit.insertPlainText("second line")
-        preview_ok = (newline_ok and window.text_toolbar.isEnabled()
+        preview_ok = (newline_ok and move_ok and window.text_toolbar.isEnabled()
                       and preview.isVisible() and preview.move_handle.isVisible())
         # Plain Enter places the text; Ctrl+Enter above inserted a line break.
         preview.text_edit.keyPressEvent(QKeyEvent(
