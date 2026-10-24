@@ -524,6 +524,8 @@ def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
         doc.save(str(temp), **options)
         # Windows will not replace an open PDF, so close PyMuPDF before rename.
         doc.close()
+        doc = None
         temp.replace(output)
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
