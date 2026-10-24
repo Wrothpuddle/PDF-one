@@ -38,6 +38,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Page tools:** thumbnails with drag-to-reorder and multi-select; rotate, delete, insert blank pages, insert from another PDF, replace, extract, split, and merge. Crop pages by dragging the area to keep, with Reset Crop to undo it. Rotating, deleting, or reordering pages keeps bookmarks and form fields.
 - **Panels:** bookmarks (add, rename, delete), layers (show or hide optional content), and search across all pages with match case and whole word options.
 - **Forms and text:** fill form fields in a table (text, check boxes, and choices), replace existing text, and export the text.
+- **Printing:** Print (Ctrl+P) and Print Preview, with or without markups, fit to paper or actual size. Landscape sheets rotate automatically to fill portrait paper.
 - **Final output:** true redaction (marked areas are permanently removed when applied), Flatten Markups, and password-protected AES-256 copies. Password-protected PDFs open with their password and stay encrypted when saved.
 - **Undo history:** undo and redo cover every edit, including page operations, and are still available after saving.
 

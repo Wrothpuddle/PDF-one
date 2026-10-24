@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 
 import compare
 import markups
+import printing
 import pdf_operations as ops
 from canvas import PdfCanvas
 from dialogs import CalibrateDialog, FormDialog, ScaleDialog
@@ -229,6 +230,15 @@ class MainWindow(QMainWindow):
         self.save_as_action = a("Save &As…", self.save_as, QKeySequence.StandardKey.SaveAs)
         self.close_action = a("&Close", lambda: self._close_tab(self.tabs.currentIndex()),
                               QKeySequence.StandardKey.Close)
+        self.print_action = a("&Print…", self.print_document, QKeySequence.StandardKey.Print)
+        self.print_preview_action = a("Print Pre&view…", self.print_preview)
+        self.print_markups_action = a("Print &Markups", None, checkable=True)
+        self.print_markups_action.setChecked(self.settings.value("printMarkups", True, type=bool))
+        self.print_markups_action.toggled.connect(
+            lambda on: self.settings.setValue("printMarkups", on))
+        self.print_fit_action = a("&Fit Pages to Paper", None, checkable=True)
+        self.print_fit_action.setChecked(self.settings.value("printFit", True, type=bool))
+        self.print_fit_action.toggled.connect(lambda on: self.settings.setValue("printFit", on))
         self.undo_action = a("&Undo", self.undo, QKeySequence.StandardKey.Undo)
         self.redo_action = a("&Redo", self.redo, QKeySequence.StandardKey.Redo)
         self.copy_action = a("&Copy", self.copy, QKeySequence.StandardKey.Copy)
@@ -273,6 +283,7 @@ class MainWindow(QMainWindow):
             self.tool_actions[kind] = action
         self.document_actions = [
             self.save_action, self.save_as_action, self.close_action, self.select_all_action,
+            self.print_action, self.print_preview_action,
             self.fit_width_action, self.fit_page_action, self.actual_size_action,
             self.zoom_in_action, self.zoom_out_action, self.single_page_action,
             self.prev_page_action, self.next_page_action, self.find_action,
@@ -287,6 +298,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.close_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.print_action)
+        file_menu.addAction(self.print_preview_action)
+        print_options = file_menu.addMenu("Print &Options")
+        print_options.addAction(self.print_markups_action)
+        print_options.addAction(self.print_fit_action)
         file_menu.addSeparator()
         self._doc_menu_action(file_menu, "Password-Protect a Copy…", self._protect_copy)
         self._doc_menu_action(file_menu, "Export Text…", self._export_text)
@@ -390,8 +407,8 @@ class MainWindow(QMainWindow):
 
     def _make_toolbars(self) -> None:
         main = self._toolbar("File", "FileToolbar")
-        for action in (self.open_action, self.save_action, None, self.undo_action,
-                       self.redo_action):
+        for action in (self.open_action, self.save_action, self.print_action, None,
+                       self.undo_action, self.redo_action):
             main.addSeparator() if action is None else main.addAction(action)
         nav = self._toolbar("Navigation", "NavigationToolbar")
         nav.addAction(self.prev_page_action)
@@ -579,6 +596,55 @@ class MainWindow(QMainWindow):
             self._remember_recent(str(Path(path).resolve()))
             return True
         return False
+
+    # -- printing ------------------------------------------------------------------
+    def _print_options(self) -> printing.PrintOptions:
+        return printing.PrintOptions(markups=self.print_markups_action.isChecked(),
+                                     fit=self.print_fit_action.isChecked())
+
+    def _printer(self):
+        from PySide6.QtPrintSupport import QPrinter
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setDocName(self.view().session.path.stem)
+        return printer
+
+    def print_document(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog
+        printer = self._printer()
+        dialog = QPrintDialog(printer, self)
+        dialog.setOption(QAbstractPrintDialog.PrintDialogOption.PrintCurrentPage, True)
+        dialog.setOption(QAbstractPrintDialog.PrintDialogOption.PrintPageRange, True)
+        dialog.setMinMax(1, view.session.page_count)
+        if not dialog.exec():
+            return
+        pages = printing.page_list(printer, view.session.page_count, view.canvas.current_page)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            count = printing.print_pages(view.session.doc, printer, pages, self._print_options())
+        except Exception as exc:
+            QMessageBox.warning(self, "Print", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage(f"Sent {count} page(s) to the printer", 4000)
+
+    def print_preview(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        from PySide6.QtPrintSupport import QPrintPreviewDialog
+        printer = self._printer()
+        dialog = QPrintPreviewDialog(printer, self)
+        dialog.setWindowTitle(f"Print Preview — {view.session.path.name}")
+        dialog.resize(1000, 800)
+        dialog.paintRequested.connect(lambda target: printing.print_pages(
+            view.session.doc, target, printing.page_list(
+                target, view.session.page_count, view.canvas.current_page),
+            self._print_options()))
+        dialog.exec()
 
     def _confirm_close(self, view: DocumentView) -> bool:
         if not view.session.dirty:
