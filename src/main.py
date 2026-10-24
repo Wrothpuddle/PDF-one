@@ -841,6 +841,26 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.nav_dock, self.tool_dock)
         self.nav_dock.raise_()
 
+    def _make_markup_toolbar(self) -> None:
+        """Provide the compact, persistent markup toolbar used by the Markup workspace."""
+        toolbar = QToolBar("Markup tools", self)
+        toolbar.setObjectName("MarkupToolbar")
+        toolbar.setMovable(True)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        toolbar.setStyleSheet(
+            "QToolBar#MarkupToolbar { background:#edf2f6; border:1px solid #bac7d1; }"
+            "QToolButton { padding:5px 8px; min-width:52px; }"
+            "QToolButton:checked { background:#cfe6f8; border:1px solid #2782bd; }"
+        )
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        toolbar.addAction(self.tool_actions["Select"])
+        toolbar.addSeparator()
+        for label in ("Place text box", "Place note", "Highlight region",
+                      "Underline region", "Strikethrough region", "Freehand pen",
+                      "Line", "Arrow", "Rectangle", "Ellipse"):
+            toolbar.addAction(self.tool_actions[label])
+
     def _set_workspace(self, index: int) -> None:
         if not hasattr(self, "workspace_tabs"):
             return
@@ -873,6 +893,7 @@ class MainWindow(QMainWindow):
                 continue
             button = QToolButton(self.tool_content)
             button.setText(label)
+            button.setDefaultAction(action)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             button.setMinimumHeight(34)
             button.setSizePolicy(button.sizePolicy().horizontalPolicy(),
@@ -892,11 +913,11 @@ class MainWindow(QMainWindow):
         note.setStyleSheet("color:#777;padding:4px;")
         self.tool_layout.addWidget(note)
         self.tool_layout.addStretch(1)
-        if name in ("Read", "Edit", "Organize", "Comment", "Fill & Sign"):
+        if name in ("Document", "Markup", "Tool Chest"):
             self.nav_dock.show()
-        if name == "Read":
+        if name == "Document":
             self.search_dock.show()
-        elif name != "Home":
+        else:
             self.search_dock.hide()
         self.settings.setValue("workspace", name)
         self.tool_dock.show()
@@ -1387,20 +1408,32 @@ class MainWindow(QMainWindow):
     def _activate_annotation_tool(self, kind: str) -> None:
         tab = self._active()
         if not tab:
-            self.statusBar().showMessage("Open a PDF before selecting an annotation tool.", 4000)
+            self.statusBar().showMessage("Open a PDF before selecting a tool.", 4000)
             return
-        if self._text_editor is not None:
+        if self._text_editor is not None and kind != "select":
             self.statusBar().showMessage("Place or cancel the active text box first.", 4000)
             return
         tab.view.set_annotation_tool(kind)
+        if kind == "select":
+            self._selected_text_box = None
+            tab.view.show_selected_object(None)
+        action = self.annotation_actions_by_kind.get(kind)
+        if action is not None:
+            action.setChecked(True)
         tab.view.setFocus()
         labels = {
-            "text": "Text box", "note": "Sticky note", "highlight": "Highlight",
-            "underline": "Underline", "strikeout": "Strikethrough", "pen": "Freehand pen",
+            "select": "Select", "text": "Text Box", "note": "Sticky Note",
+            "highlight": "Highlight", "underline": "Underline",
+            "strikeout": "Strikethrough", "pen": "Freehand Pen",
             "line": "Line", "arrow": "Arrow", "rectangle": "Rectangle", "ellipse": "Ellipse",
         }
+        self._update_tool_indicator(kind)
+        message = "Click or drag on the page"
+        if kind == "select":
+            message = "Click a placed text box to select it; drag it to move"
         self.statusBar().showMessage(
-            f"{labels.get(kind, kind)} active · click or drag on the page · Esc to exit"
+            f"{labels.get(kind, kind.title())} tool active · {message} · Esc returns to Select",
+            5000,
         )
 
     @staticmethod
@@ -1494,15 +1527,21 @@ class MainWindow(QMainWindow):
         editor.text_edit.setCurrentCharFormat(char_format)
 
     def _escape_to_pointer(self) -> None:
-        """Cancel a live text box or leave the current tool and restore the cursor."""
+        """Switch back to Select, cancelling a live placement when necessary."""
         if self._text_editor is not None:
             self._cancel_text_box()
-            return
         tab = self._active()
-        if tab is not None and tab.view.annotation_tool is not None:
-            tab.view.set_annotation_tool(None)
+        if tab is not None:
+            tab.view.set_annotation_tool("select")
+            tab.view.show_selected_object(None)
             tab.view.setFocus()
-            self.statusBar().showMessage("Pointer tool active", 2500)
+        self._selected_text_box = None
+        if hasattr(self, "annotation_actions_by_kind"):
+            self.annotation_actions_by_kind["select"].setChecked(True)
+        self._update_tool_indicator("select")
+        self.statusBar().showMessage(
+            "Select tool active · click and drag placed text boxes to move them", 4000
+        )
 
     def _cancel_text_box(self) -> None:
         if self._text_editor is not None:
@@ -1513,9 +1552,13 @@ class MainWindow(QMainWindow):
         self._text_context = None
         self.text_toolbar.setEnabled(False)
         if tab is not None:
-            tab.view.set_annotation_tool(None)
+            tab.view.set_annotation_tool("select")
+            tab.view.show_selected_object(None)
             tab.view.setFocus()
-        self.statusBar().showMessage("Text placement cancelled · pointer tool active", 3000)
+        if hasattr(self, "annotation_actions_by_kind"):
+            self.annotation_actions_by_kind["select"].setChecked(True)
+        self._update_tool_indicator("select")
+        self.statusBar().showMessage("Text placement cancelled · Select tool active", 3000)
 
     def _commit_text_box(self) -> None:
         editor = self._text_editor
@@ -1560,8 +1603,12 @@ class MainWindow(QMainWindow):
             self.text_toolbar.setEnabled(False)
             tab._reload_working_copy(page_index)
             self._set_tab_modified(tab)
+            self._selected_text_box = None
+            tab.view.set_annotation_tool("select")
+            self.annotation_actions_by_kind["select"].setChecked(True)
+            self._update_tool_indicator("select")
             self.statusBar().showMessage(
-                "Formatted text placed · Ctrl+Z to undo · Ctrl+S to save", 5000
+                "Text box placed · drag it with Select to reposition · Ctrl+Z to undo", 5000
             )
         except Exception as exc:
             QMessageBox.warning(self, "Could not place text", str(exc))
@@ -1589,9 +1636,10 @@ class MainWindow(QMainWindow):
         ]
         if kind == "note":
             x, y = start
-            x = min(max(x, float(box.left)), float(box.right) - 22)
-            y = min(max(y, float(box.bottom)), float(box.top) - 22)
-            rect = (x, y, x + 22, y + 22)
+            note_width, note_height = 160.0, 92.0
+            x = min(max(x, float(box.left)), float(box.right) - note_width)
+            y = min(max(y, float(box.bottom)), float(box.top) - note_height)
+            rect = (x, y, x + note_width, y + note_height)
             text, accepted = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
             if not accepted or not text.strip():
                 return
@@ -1619,8 +1667,9 @@ class MainWindow(QMainWindow):
             tab._reload_working_copy(page)
             self._set_tab_modified(tab)
             tool_name = kind.replace("strikeout", "strikethrough").replace("pen", "freehand")
+            self._update_tool_indicator(kind)
             self.statusBar().showMessage(
-                f"{tool_name.title()} annotation pending · Ctrl+S to save · Esc to stop tool", 5000
+                f"{tool_name.title()} placed · Ctrl+Z to undo · Ctrl+S to save · Esc selects", 5000
             )
         except Exception as exc:
             QMessageBox.warning(self, "Could not add annotation", str(exc))
