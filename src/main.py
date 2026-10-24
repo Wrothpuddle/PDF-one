@@ -155,13 +155,14 @@ class TextPlacementEditor(QFrame):
 
 
 class InteractivePdfView(QPdfView):
-    """PDF view with mouse-wheel zoom, middle-button panning, and annotation gestures."""
+    """PDF view with selection, markup gestures, zoom, and middle-button panning."""
 
     annotationGesture = Signal(object)
+    selectionGesture = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.annotation_tool: str | None = None
+        self.annotation_tool = "select"
         self._pan_point = None
         self._pan_h = 0
         self._pan_v = 0
@@ -173,11 +174,31 @@ class InteractivePdfView(QPdfView):
         self._draw_page = 0
         self._draw_location = QPointF()
         self._draw_zoom = 1.0
+        self._select_start = None
+        self._select_page = 0
+        self._select_location = QPointF()
+        self._select_zoom = 1.0
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._selection_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._selection_band.setStyleSheet(
+            "QRubberBand { border:2px solid #1683d8; background:transparent; }"
+        )
 
     def set_annotation_tool(self, tool: str | None) -> None:
-        self.annotation_tool = tool
-        self.setCursor(Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
+        self.annotation_tool = tool or "select"
+        if self.annotation_tool == "select":
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._rubber_band.hide()
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def show_selected_object(self, rect: QRect | None) -> None:
+        if rect is None:
+            self._selection_band.hide()
+            return
+        self._selection_band.setGeometry(rect)
+        self._selection_band.show()
+        self._selection_band.raise_()
 
     def wheelEvent(self, event) -> None:
         """Use the wheel to zoom around the pointer; middle drag remains the pan gesture."""
@@ -217,7 +238,16 @@ class InteractivePdfView(QPdfView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool:
+        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool == "select":
+            point = event.position().toPoint()
+            nav = self.pageNavigator()
+            self._select_start = (float(point.x()), float(point.y()))
+            self._select_page = max(0, nav.currentPage())
+            self._select_location = QPointF(nav.currentLocation())
+            self._select_zoom = max(float(nav.currentZoom()), 0.1)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool != "select":
             point = event.position().toPoint()
             nav = self.pageNavigator()
             self._draw_start = (float(point.x()), float(point.y()))
@@ -226,7 +256,7 @@ class InteractivePdfView(QPdfView):
             self._draw_location = QPointF(nav.currentLocation())
             self._draw_zoom = max(float(nav.currentZoom()), 0.1)
             self._rubber_band.setGeometry(point.x(), point.y(), 1, 1)
-            if self.annotation_tool != "note":
+            if self.annotation_tool not in ("note", "text"):
                 self._rubber_band.show()
             event.accept()
             return
@@ -243,8 +273,6 @@ class InteractivePdfView(QPdfView):
             pan_x = horizontal.value() == self._pan_h
             pan_y = vertical.value() == self._pan_v
             if pan_x or pan_y:
-                # Fit modes can disable both scroll bars. Use page navigator offsets
-                # to let the user reposition a small, fully visible page in its margins.
                 document = self.document()
                 page_size = document.pagePointSize(self._pan_page) if document else None
                 if page_size is not None:
@@ -260,6 +288,15 @@ class InteractivePdfView(QPdfView):
                     self.setZoomMode(QPdfView.ZoomMode.Custom)
                     self.setZoomFactor(zoom)
                     self.pageNavigator().jump(self._pan_page, QPointF(x, y), zoom)
+            event.accept()
+            return
+        if self._select_start is not None:
+            left, top = self._select_start
+            self._selection_band.setGeometry(
+                int(min(left, point.x())), int(min(top, point.y())),
+                max(1, int(abs(point.x() - left))), max(1, int(abs(point.y() - top))),
+            )
+            self._selection_band.show()
             event.accept()
             return
         if self._draw_start is not None:
@@ -280,7 +317,20 @@ class InteractivePdfView(QPdfView):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.MiddleButton and self._pan_point is not None:
             self._pan_point = None
-            self.setCursor(Qt.CursorShape.CrossCursor if self.annotation_tool else Qt.CursorShape.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor if self.annotation_tool == "select"
+                           else Qt.CursorShape.CrossCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._select_start is not None:
+            end = event.position().toPoint()
+            self.selectionGesture.emit({
+                "page": self._select_page,
+                "start": self._select_start,
+                "end": (float(end.x()), float(end.y())),
+                "location": QPointF(self._select_location),
+                "zoom": self._select_zoom,
+            })
+            self._select_start = None
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._draw_start is not None:
@@ -305,8 +355,9 @@ class InteractivePdfView(QPdfView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape and self.annotation_tool:
-            self.set_annotation_tool(None)
+        if event.key() == Qt.Key.Key_Escape:
+            self.set_annotation_tool("select")
+            self.show_selected_object(None)
             event.accept()
             return
         super().keyPressEvent(event)
