@@ -522,6 +522,8 @@ def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
             options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
                            user_pw=password or "", owner_pw=password or "")
         doc.save(str(temp), **options)
+        # Windows will not replace an open PDF, so close PyMuPDF before rename.
+        doc.close()
         temp.replace(output)
     finally:
         doc.close()
