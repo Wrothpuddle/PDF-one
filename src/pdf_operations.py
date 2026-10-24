@@ -305,6 +305,69 @@ def protect_pdf(source: str | Path, output: str | Path, password: str,
 
 
 
+def add_rich_text_box(source: str | Path, output: str | Path, page_index: int,
+                       rect: tuple[float, float, float, float], text: str,
+                       style: dict, password: str | None = None) -> None:
+    """Add a formatted, editable FreeText annotation to a new PDF revision."""
+    import html
+    import fitz
+
+    _require_new_output(source, output)
+    if not text.strip():
+        raise ValueError("Text box cannot be empty.")
+    try:
+        doc = fitz.open(str(source))
+    except Exception as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
+    encrypted = doc.needs_pass
+    try:
+        if encrypted and not doc.authenticate(password or ""):
+            raise PermissionError("The PDF is encrypted; a valid password is required.")
+        if not 0 <= page_index < doc.page_count:
+            raise IndexError("Page index is outside the document.")
+        page = doc[page_index]
+        pdf_rect = fitz.Rect(*(float(value) for value in rect))
+        if pdf_rect.is_empty or pdf_rect.width < 4 or pdf_rect.height < 4:
+            raise ValueError("Text box must have positive width and height.")
+        pdf_bounds = fitz.Rect(0, 0, page.rect.width, page.rect.height) * ~page.transformation_matrix
+        if not pdf_bounds.contains(pdf_rect):
+            raise ValueError("Text box must fit inside the page bounds.")
+        mupdf_rect = pdf_rect * page.transformation_matrix
+
+        size = max(4.0, min(144.0, float(style.get("size", 12))))
+        letter_spacing = max(0.0, min(20.0, float(style.get("letter_spacing", 0))))
+        line_spacing = max(0.5, min(4.0, float(style.get("line_spacing", 1.0))))
+        alignment = str(style.get("alignment", "left")).lower()
+        align_value = {"left": fitz.TEXT_ALIGN_LEFT, "center": fitz.TEXT_ALIGN_CENTER,
+                       "right": fitz.TEXT_ALIGN_RIGHT, "justify": fitz.TEXT_ALIGN_JUSTIFY}.get(alignment)
+        if align_value is None:
+            raise ValueError("Unknown text alignment.")
+        weight = "bold" if style.get("bold") else "normal"
+        italic = "italic" if style.get("italic") else "normal"
+        decoration = "underline" if style.get("underline") else "none"
+        escaped = html.escape(text).replace("\\n", "<br/>")
+        rich_text = (
+            f'<div style="font-family:sans-serif;font-size:{size:.2f}pt;'
+            f'font-weight:{weight};font-style:{italic};text-decoration:{decoration};'
+            f'letter-spacing:{letter_spacing:.2f}pt;line-height:{line_spacing * 100:.0f}%;'
+            f'text-align:{alignment};margin:0">{escaped}</div>'
+        )
+        annot = page.add_freetext_annot(
+            mupdf_rect, rich_text, fontsize=size, richtext=True, align=align_value,
+            style=f"font-family:sans-serif;font-size:{size:.2f}pt;",
+            fill_color=(1, 1, 1), border_color=(0.18, 0.43, 0.82),
+            border_width=0.7, opacity=1,
+        )
+        annot.update()
+        options = {"garbage": 3, "deflate": True}
+        if encrypted:
+            options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
+                           user_pw=password or "", owner_pw=password or "")
+        doc.save(str(output), **options)
+    finally:
+        doc.close()
+
+
 def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
                        kind: str, rect: tuple[float, float, float, float],
                        text: str = "", vertices: list[tuple[float, float]] | None = None,
