@@ -30,6 +30,64 @@ from PySide6.QtWidgets import (
 APP_NAME = "Northstar PDF"
 
 
+class PlacementTextEdit(QTextEdit):
+    """Text editor with explicit Place-on-Enter and newline-on-Ctrl+Enter behavior."""
+
+    placeRequested = Signal()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() == Qt.KeyboardModifier.NoModifier:
+                self.placeRequested.emit()
+                event.accept()
+                return
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.textCursor().insertBlock()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
+class DragHandle(QLabel):
+    """Small grip that moves a live text box without interrupting typing."""
+
+    def __init__(self, editor: "TextPlacementEditor") -> None:
+        super().__init__("⠿  Drag to move", editor)
+        self._origin = None
+        self._initial_pos = None
+        self.setFixedHeight(20)
+        self.setAccessibleName("Move text box")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setStyleSheet("background:#eaf2fc;color:#245c9b;border:0;font-size:11px;padding-left:4px;")
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._origin = event.globalPosition().toPoint()
+            self._initial_pos = self.parentWidget().pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._origin is not None and self._initial_pos is not None:
+            delta = event.globalPosition().toPoint() - self._origin
+            editor = self.parentWidget()
+            bounds = editor.parentWidget().rect()
+            x = max(0, min(bounds.width() - editor.width(),
+                           self._initial_pos.x() + delta.x()))
+            y = max(0, min(bounds.height() - editor.height(),
+                           self._initial_pos.y() + delta.y()))
+            editor.move(x, y)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._origin = None
+        self._initial_pos = None
+        event.accept()
+
+
 class ResizeCorner(QLabel):
     """Drag handle that lets users resize the live text box in the page view."""
 
@@ -75,26 +133,25 @@ class TextPlacementEditor(QFrame):
             "QFrame#TextPlacementEditor { background:#ffffff; border:2px solid #2878d0; }"
             "QTextEdit { background:#ffffff; color:#111111; border:0; padding:2px; }"
         )
-        self.text_edit = QTextEdit(self)
+        self.move_handle = DragHandle(self)
+        self.text_edit = PlacementTextEdit(self)
         self.text_edit.setAcceptRichText(False)
         self.text_edit.setPlaceholderText("Type your text here…")
         self.text_edit.setAccessibleName("Text to place in PDF")
         layout = QGridLayout(self)
         layout.setContentsMargins(5, 4, 5, 5)
-        layout.addWidget(self.text_edit, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.move_handle, 0, 0)
+        layout.addWidget(self.text_edit, 1, 0)
         self.resize_corner = ResizeCorner(self)
-        layout.addWidget(self.resize_corner, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        layout.addWidget(self.resize_corner, 1, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         self._add_shortcuts()
 
     def _add_shortcuts(self) -> None:
         self.cancel_action = QAction("Cancel text placement", self)
-        self.cancel_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
-        self.cancel_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.addAction(self.cancel_action)
+        # Escape is handled by the main window so it works from the page,
+        # text editor, formatting bar, and tool panel.
         self.commit_action = QAction("Place text", self)
-        self.commit_action.setShortcut("Ctrl+Return")
-        self.commit_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.addAction(self.commit_action)
 
 
 class InteractivePdfView(QPdfView):
@@ -395,6 +452,11 @@ class MainWindow(QMainWindow):
         self._make_toolbar()
         self._make_tool_dock()
         self._make_menus()
+        self.escape_action = QAction("Return to cursor", self)
+        self.escape_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        self.escape_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.escape_action.triggered.connect(self._escape_to_pointer)
+        self.addAction(self.escape_action)
         self._make_workspace_tabs()
         self.tabs.currentChanged.connect(self._refresh_active_document)
         self.tabs.tabCloseRequested.connect(self._close_tab)
@@ -1195,6 +1257,7 @@ class MainWindow(QMainWindow):
         }
         editor.cancel_action.triggered.connect(self._cancel_text_box)
         editor.commit_action.triggered.connect(self._commit_text_box)
+        editor.text_edit.placeRequested.connect(self._commit_text_box)
         editor.show()
         editor.raise_()
         self.text_toolbar.setEnabled(True)
@@ -1250,14 +1313,29 @@ class MainWindow(QMainWindow):
         editor.text_edit.setTextCursor(cursor)
         editor.text_edit.setCurrentCharFormat(char_format)
 
+    def _escape_to_pointer(self) -> None:
+        """Cancel a live text box or leave the current tool and restore the cursor."""
+        if self._text_editor is not None:
+            self._cancel_text_box()
+            return
+        tab = self._active()
+        if tab is not None and tab.view.annotation_tool is not None:
+            tab.view.set_annotation_tool(None)
+            tab.view.setFocus()
+            self.statusBar().showMessage("Pointer tool active", 2500)
+
     def _cancel_text_box(self) -> None:
         if self._text_editor is not None:
             self._text_editor.deleteLater()
+        tab = self._text_active_tab
         self._text_editor = None
         self._text_active_tab = None
         self._text_context = None
         self.text_toolbar.setEnabled(False)
-        self.statusBar().showMessage("Text placement cancelled", 3000)
+        if tab is not None:
+            tab.view.set_annotation_tool(None)
+            tab.view.setFocus()
+        self.statusBar().showMessage("Text placement cancelled · pointer tool active", 3000)
 
     def _commit_text_box(self) -> None:
         editor = self._text_editor
