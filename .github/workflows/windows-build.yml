@@ -3,6 +3,7 @@ name: Build Windows app
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -22,10 +23,14 @@ jobs:
           cache: pip
       - name: Install local build dependencies
         run: python -m pip install -r requirements.txt pyinstaller pytest
-      - name: Run offline guard tests
+      - name: Run unit tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+      - name: Run app self-test from source
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python src/main.py --self-test
       - name: Package standalone executable
         run: >-
           pyinstaller --noconfirm --clean --windowed --onefile
@@ -41,7 +46,15 @@ jobs:
       - name: Smoke test packaged executable
         env:
           QT_QPA_PLATFORM: offscreen
-        run: .\dist\NorthstarPDF.exe --self-test
+        shell: pwsh
+        # A windowed executable does not block PowerShell or report its exit
+        # code unless it is started with -Wait -PassThru.
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "northstar-self-test.txt"
+          $env:NORTHSTAR_SELF_TEST_REPORT = $report
+          $process = Start-Process -FilePath .\dist\NorthstarPDF.exe -ArgumentList "--self-test" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($process.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($process.ExitCode)" }
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:

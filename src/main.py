@@ -1153,7 +1153,8 @@ class MainWindow(QMainWindow):
         if not output:
             return
         try:
-            extract_pages(tab.path, output, [tab.view.pageNavigator().currentPage()])
+            extract_pages(tab.edit_session.working_path, output,
+                          [tab.view.pageNavigator().currentPage()], tab.password)
             self._finish_page_operation(output)
         except Exception as exc:
             QMessageBox.warning(self, "Could not extract page", str(exc))
@@ -1506,7 +1507,8 @@ class MainWindow(QMainWindow):
         block_format = QTextBlockFormat()
         block_format.setLineHeight(
             float(style["line_spacing"]) * 100.0,
-            QTextBlockFormat.LineHeightTypes.ProportionalHeight,
+            # PySide6 6.12 accepts only the integer value of the enum here.
+            QTextBlockFormat.LineHeightTypes.ProportionalHeight.value,
         )
         alignment = {
             "left": Qt.AlignmentFlag.AlignLeft,
@@ -1802,6 +1804,21 @@ class MainWindow(QMainWindow):
             self._show_start_page()
 
 
+def _report_self_test(checks: list[tuple[str, bool]]) -> int:
+    """Print self-test results and copy them to NORTHSTAR_SELF_TEST_REPORT if set.
+
+    The packaged build is a windowed executable without a console, so CI reads
+    the report file instead of stdout.
+    """
+    lines = [f"{name}: {'PASS' if ok else 'FAIL'}" for name, ok in checks]
+    report = os.environ.get("NORTHSTAR_SELF_TEST_REPORT")
+    if report:
+        Path(report).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for line in lines:
+        print(line)
+    return 0 if all(ok for _name, ok in checks) else 1
+
+
 def self_test() -> int:
     """Small executable smoke check used by the Windows build workflow."""
     from tempfile import NamedTemporaryFile
@@ -1920,7 +1937,7 @@ def self_test() -> int:
             QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
             Qt.KeyboardModifier.ControlModifier,
         ))
-        newline_ok = preview.text_edit.toPlainText() == "Visible preview\\n"
+        newline_ok = preview.text_edit.toPlainText() == "Visible preview\n"
         preview.text_edit.insertPlainText("second line")
         preview_ok = (newline_ok and move_ok and window.text_toolbar.isEnabled()
                       and preview.isVisible() and preview.move_handle.isVisible())
@@ -1961,16 +1978,15 @@ def self_test() -> int:
         text_tab.discard_edits()
         window.close()
 
-        print("PDFium malformed-file smoke test:",
-              "PASS" if malformed_ok else f"FAIL ({result})")
-        print("Task workspaces and movable tools panel:", "PASS" if ui_ok else "FAIL")
-        print("Scroll-wheel zoom:", "PASS" if zoom_ok else "FAIL")
-        print("Middle-button drag pan:", "PASS" if pan_ok else "FAIL")
-        print("Panning with fit-to-page scrollbars disabled:",
-              "PASS" if fit_pan_ok else "FAIL")
-        print("Select moves text; Enter/Ctrl+Enter/Escape controls:",
-              "PASS" if text_box_ok else "FAIL")
-        return 0 if malformed_ok and ui_ok and zoom_ok and pan_ok and fit_pan_ok and text_box_ok else 1
+        checks = [
+            ("PDFium malformed-file smoke test", malformed_ok),
+            ("Task workspaces and movable tools panel", ui_ok),
+            ("Scroll-wheel zoom", zoom_ok),
+            ("Middle-button drag pan", pan_ok),
+            ("Panning with fit-to-page scrollbars disabled", fit_pan_ok),
+            ("Select moves text; Enter/Ctrl+Enter/Escape controls", text_box_ok),
+        ]
+        return _report_self_test(checks)
     finally:
         document.close()
         os.unlink(malformed_path)

@@ -347,7 +347,7 @@ def add_rich_text_box(source: str | Path, output: str | Path, page_index: int,
         weight = "bold" if style.get("bold") else "normal"
         italic = "italic" if style.get("italic") else "normal"
         decoration = "underline" if style.get("underline") else "none"
-        escaped = html.escape(text).replace("\\n", "<br/>").replace("\\r", "")
+        escaped = html.escape(text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
         markup = (
             f'<p style="font-family:sans-serif;font-size:{size:.2f}pt;'
             f'font-weight:{weight};font-style:{italic};text-decoration:{decoration};'

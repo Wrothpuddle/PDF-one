@@ -63,3 +63,16 @@ def test_text_box_preserves_encryption_and_rejects_bad_inputs(tmp_path: Path) ->
     with pytest.raises(ValueError, match="page bounds"):
         add_rich_text_box(locked, tmp_path / "outside.pdf", 0,
                           (-20, 100, 300, 160), "Text", {}, "secret")
+
+
+def test_text_box_keeps_line_breaks(tmp_path: Path) -> None:
+    source, output = tmp_path / "source.pdf", tmp_path / "with-text.pdf"
+    make_pdf(source)
+    add_rich_text_box(source, output, 0, (72, 500, 360, 700), "alpha line\nbravo line", {})
+    rendered = fitz.open(output)
+    lines = [line for block in rendered[0].get_text("dict")["blocks"]
+             for line in block.get("lines", [])]
+    tops = {round(line["bbox"][1]) for line in lines
+            if "".join(span["text"] for span in line["spans"]).strip() in ("alpha line", "bravo line")}
+    rendered.close()
+    assert len(tops) == 2
