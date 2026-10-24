@@ -1598,11 +1598,8 @@ def self_test() -> int:
         window._commit_text_box()
         app.processEvents()
         placed_reader = PdfReader(str(text_tab.edit_session.working_path), strict=False)
-        placed_annots = placed_reader.pages[gesture["page"]].get("/Annots", [])
-        placed_text = any(
-            annot.get_object().get("/Subtype") == "/FreeText"
-            and annot.get_object().get("/RC") is not None for annot in placed_annots
-        )
+        extracted = placed_reader.pages[gesture["page"]].extract_text() or ""
+        placed_text = "Visible preview" in extracted and "second line" in extracted
         text_box_ok = preview_ok and resize_ok and placed_text
         text_tab.discard_edits()
         window.close()
