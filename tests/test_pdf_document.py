@@ -173,3 +173,18 @@ def test_text_reads_on_rotated_pages_do_not_break_the_journal(tmp_path: Path) ->
         assert session.can_undo  # the rotation is still undoable
     finally:
         session.close()
+
+
+def test_text_replacement_and_font_embedding_work_in_a_session(tmp_path: Path) -> None:
+    """insert_text embeds fonts in its own journal step, so it runs via apply_copy."""
+    source = tmp_path / "plans.pdf"
+    make_pdf(source)
+    session = PdfSession(source)
+    try:
+        count = session.apply_copy("Edit", lambda doc: ops.replace_existing_text(
+            doc, 0, "Sheet 1", "Sheet 1A"))
+        assert count == 1 and "Sheet 1A" in session.doc[0].get_text()
+        session.undo()
+        assert "Sheet 1A" not in session.doc[0].get_text()
+    finally:
+        session.close()

@@ -31,6 +31,7 @@ import compare
 import icons
 import links
 import markups
+import ocr
 import printing
 import report
 from recovery import RecoveryStore
@@ -413,6 +414,7 @@ class MainWindow(QMainWindow):
         self._doc_menu_action(tools, "Overlay Pages…", self._overlay_pages)
         tools.addAction(self._action("&Batch Process…", self._batch))
         tools.addSeparator()
+        self._doc_menu_action(tools, "Recognize Text (OCR)…", self._ocr)
         self._doc_menu_action(tools, "Fill Form Fields…", self._fill_form)
         self._doc_menu_action(tools, "Edit Existing Text…", self._edit_existing_text)
         tools.addSeparator()
@@ -1074,6 +1076,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, label, str(exc))
             return None
 
+    def _apply_copy(self, view: DocumentView, label: str, operation):
+        try:
+            return view.session.apply_copy(label, operation)
+        except Exception as exc:
+            QMessageBox.warning(self, label, str(exc))
+            return None
+
     def _create_markup(self, view: DocumentView, kind: str, page: int, points: list,
                        text: str) -> None:
         if kind not in KIND_LABELS:
@@ -1681,7 +1690,9 @@ class MainWindow(QMainWindow):
         new, accepted = QInputDialog.getText(self, "Edit existing text",
                                              "Replacement text (empty removes it):")
         if accepted:
-            count = self._apply(view, "Edit Text", lambda doc: ops.replace_existing_text(
+            # insert_text embeds a font through its own journal step, so this
+            # runs on a document copy (still undoable).
+            count = self._apply_copy(view, "Edit Text", lambda doc: ops.replace_existing_text(
                 doc, page, old, new))
             if count:
                 self.statusBar().showMessage(f"Replaced {count} occurrence(s)", 4000)
@@ -1894,6 +1905,76 @@ class MainWindow(QMainWindow):
                    f"{dialog.folder.text().strip()}\n\n" + "\n".join(lines[:30]))
         (QMessageBox.warning if failed else QMessageBox.information)(
             self, "Batch process", summary)
+
+    def _ocr(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        tessdata = ocr.find_tessdata()
+        langs = ocr.languages(tessdata)
+        if not tessdata or not langs:
+            QMessageBox.warning(self, "Recognize text",
+                                "The OCR language data (tessdata) was not found next to the "
+                                "program. Reinstall Northstar PDF, or run "
+                                "tools/get_tessdata.py when working from source.")
+            return
+        doc = view.session.doc
+        scopes = ["Pages without text", "Current page", "All pages"]
+        scope, accepted = QInputDialog.getItem(self, "Recognize text (OCR)", "Pages:", scopes, 0,
+                                               False)
+        if not accepted:
+            return
+        language = langs[0]
+        if len(langs) > 1:
+            language, accepted = QInputDialog.getItem(self, "Recognize text (OCR)",
+                                                      "Language:", langs, langs.index("eng")
+                                                      if "eng" in langs else 0, False)
+            if not accepted:
+                return
+        if scope == "Current page":
+            pages = [view.canvas.current_page]
+        elif scope == "All pages":
+            pages = list(range(doc.page_count))
+        else:
+            pages = [i for i in range(doc.page_count) if not ocr.page_has_text(doc[i])]
+        if not pages:
+            QMessageBox.information(self, "Recognize text", "Every page already has text.")
+            return
+        from PySide6.QtWidgets import QProgressDialog
+        progress = QProgressDialog("Recognizing text…", "Stop", 0, len(pages), self)
+        progress.setWindowTitle("Recognize text (OCR)")
+        progress.setMinimumDuration(0)
+
+        class Stopped(Exception):
+            pass
+
+        def run(copy):
+            total = 0
+            for number, index in enumerate(pages):
+                progress.setValue(number)
+                progress.setLabelText(f"Page {index + 1} ({number + 1} of {len(pages)})")
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    raise Stopped()
+                total += ocr.ocr_page(copy[index], tessdata, language)
+            return total
+
+        try:
+            words = view.session.apply_copy("Recognize Text", run)
+        except Stopped:
+            self.statusBar().showMessage("OCR stopped; no pages were changed.", 5000)
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "Recognize text", str(exc))
+            return
+        finally:
+            progress.setValue(len(pages))
+        self.statusBar().showMessage(
+            f"Recognized {words} words on {len(pages)} page(s). Text is now searchable.", 6000)
+        if not words:
+            QMessageBox.information(self, "Recognize text",
+                                    "No text was recognized. If a page shows sideways, rotate "
+                                    "it to read upright first.")
 
     def _auto_link(self) -> None:
         view = self.view()
@@ -2259,6 +2340,16 @@ def self_test() -> int:
         checks.append(("Sharp render at high zoom", any(item.detail is not None or
                                                         item.base_scale >= canvas.zoom * 0.99
                                                         for item in canvas.pages if item.base)))
+        tessdata = ocr.find_tessdata()
+        scan = fitz.open()
+        scan_page = scan.new_page(width=400, height=120)
+        scan_page.insert_text((20, 70), "REVISION NOTES", fontsize=28)
+        image_only = fitz.open()
+        image_page = image_only.new_page(width=400, height=120)
+        image_page.insert_image(image_page.rect, pixmap=scan_page.get_pixmap(dpi=150))
+        ocr_words = ocr.ocr_page(image_page, tessdata) if tessdata else 0
+        checks.append(("OCR reads a scanned page", bool(tessdata) and ocr_words >= 2
+                       and "REVISION" in image_page.get_text()))
         checks.append(("License text is bundled",
                        "GNU AFFERO GENERAL PUBLIC LICENSE" in read_bundled_text("LICENSE")))
         checks.append(("No unexpected message boxes", not dialogs))

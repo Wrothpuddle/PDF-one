@@ -41,6 +41,7 @@ A table of every markup in the document showing page, type, subject, comment, au
 - **Viewing:** tabs for several documents, continuous or single-page view, wheel zoom at the cursor, middle-drag or Space+drag panning, zoom to area, fit width or page, and sharp rendering at high zoom on large-format sheets.
 - **Page tools:** thumbnails with drag-to-reorder and multi-select; rotate, delete, insert blank pages, insert from another PDF, replace, extract, split, and merge. Crop pages by dragging the area to keep, with Reset Crop to undo it. Rotating, deleting, or reordering pages keeps bookmarks and form fields.
 - **Panels:** bookmarks (add, rename, delete), layers (show or hide optional content), and search across all pages with match case and whole word options.
+- **OCR** (Tools → Recognize Text) makes scanned pages searchable and selectable by adding an invisible text layer aligned with the scan. It can process the current page, every page without text, or all pages, and can be undone. English is bundled; pages must read upright on screen.
 - **Forms and text:** fill form fields in a table (text, check boxes, and choices), replace existing text, and export the text.
 - **Printing:** Print (Ctrl+P) and Print Preview, with or without markups, fit to paper or actual size. Landscape sheets rotate automatically to fill portrait paper.
 - **Final output:** true redaction (marked areas are permanently removed when applied), Flatten Markups, and password-protected AES-256 copies. Password-protected PDFs open with their password and stay encrypted when saved.
@@ -61,6 +62,7 @@ On Windows with Python 3.12:
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt pyinstaller pytest
+python tools\get_tessdata.py
 python src\main.py
 python -m pytest -q
 python src\main.py --self-test
@@ -87,6 +89,8 @@ To make a local executable, run the `pyinstaller` command in `.github/workflows/
 | `src/printing.py` | Printing |
 | `src/recovery.py` | Autosave copies and crash recovery |
 | `src/batch.py` | Batch processing |
+| `src/ocr.py` | OCR text layer for scanned pages |
+| `tools/get_tessdata.py` | Downloads and verifies the OCR language data |
 | `src/icons.py` | Toolbar icons drawn in code |
 | `src/offline_guard.py` | Blocks network access from Python code |
 
@@ -108,7 +112,7 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 
 ## Not implemented yet
 
-- **Document content:** OCR of scanned pages; digital signatures and certificate validation; Office and image conversion.
+- **Document content:** digital signatures and certificate validation; Office and image conversion; OCR languages other than English (add `<lang>.traineddata` files to the `tessdata` folder).
 - **Multi-file and collaboration:** Sets (multi-file drawing packages) and real-time collaboration (left out on purpose to keep the app offline).
 - **Measurement:** separate scales for viewports within a page, and area cutouts.
 - **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.

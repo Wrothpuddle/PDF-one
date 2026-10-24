@@ -23,6 +23,8 @@ jobs:
           cache: pip
       - name: Install local build dependencies
         run: python -m pip install -r requirements.txt pyinstaller pytest
+      - name: Download OCR language data
+        run: python tools/get_tessdata.py eng
       - name: Run unit tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -39,6 +41,7 @@ jobs:
           --paths src
           --add-data "LICENSE:."
           --add-data "THIRD_PARTY_NOTICES.md:."
+          --add-data "tessdata:tessdata"
           --collect-all pymupdf
           --hidden-import PySide6.QtTest
           src/main.py
