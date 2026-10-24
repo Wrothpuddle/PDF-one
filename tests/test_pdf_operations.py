@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
+import fitz
 from pypdf import PdfReader, PdfWriter
 
 from pdf_operations import (crop_page, delete_page, extract_pages, insert_pages, merge_pdfs,
@@ -165,6 +166,14 @@ def test_text_and_drawing_annotations(tmp_path: Path, kind: str, expected_subtyp
     )
     annotation = PdfReader(output).pages[0]["/Annots"][0].get_object()
     assert annotation["/Subtype"] == expected_subtype
+    visible = fitz.open(output)
+    page = visible[0]
+    assert page.get_drawings()
+    pix = page.get_pixmap(clip=fitz.Rect(100, 632, 220, 692))
+    assert any(value < 248 for value in pix.samples)
+    if kind in ("note", "text"):
+        assert "Sample annotation" in page.get_text()
+    visible.close()
     assert len(PdfReader(source).pages[0].get("/Annots", [])) == 0
 
 
