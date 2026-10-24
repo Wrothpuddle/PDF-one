@@ -38,6 +38,9 @@ class InteractivePdfView(QPdfView):
         self._pan_point = None
         self._pan_h = 0
         self._pan_v = 0
+        self._pan_page = 0
+        self._pan_location = QPointF()
+        self._pan_zoom = 1.0
         self._draw_start = None
         self._draw_points: list[tuple[float, float]] = []
         self._draw_page = 0
@@ -80,6 +83,10 @@ class InteractivePdfView(QPdfView):
             self._pan_point = event.position().toPoint()
             self._pan_h = self.horizontalScrollBar().value()
             self._pan_v = self.verticalScrollBar().value()
+            navigator = self.pageNavigator()
+            self._pan_page = max(0, navigator.currentPage())
+            self._pan_location = QPointF(navigator.currentLocation())
+            self._pan_zoom = max(float(navigator.currentZoom()), 0.1)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -102,8 +109,30 @@ class InteractivePdfView(QPdfView):
         point = event.position().toPoint()
         if self._pan_point is not None:
             delta = point - self._pan_point
-            self.horizontalScrollBar().setValue(self._pan_h - delta.x())
-            self.verticalScrollBar().setValue(self._pan_v - delta.y())
+            horizontal = self.horizontalScrollBar()
+            vertical = self.verticalScrollBar()
+            horizontal.setValue(self._pan_h - delta.x())
+            vertical.setValue(self._pan_v - delta.y())
+            pan_x = horizontal.value() == self._pan_h
+            pan_y = vertical.value() == self._pan_v
+            if pan_x or pan_y:
+                # Fit modes can disable both scroll bars. Use page navigator offsets
+                # to let the user reposition a small, fully visible page in its margins.
+                document = self.document()
+                page_size = document.pagePointSize(self._pan_page) if document else None
+                if page_size is not None:
+                    zoom = self._pan_zoom
+                    margin_x = max(0.0, (self.viewport().width()
+                                         - float(page_size.width()) * zoom) / (2.0 * zoom))
+                    margin_y = max(0.0, (self.viewport().height()
+                                         - float(page_size.height()) * zoom) / (2.0 * zoom))
+                    x = self._pan_location.x() - (delta.x() / zoom if pan_x else 0.0)
+                    y = self._pan_location.y() - (delta.y() / zoom if pan_y else 0.0)
+                    x = max(-margin_x, min(margin_x, x))
+                    y = max(-margin_y, min(margin_y, y))
+                    self.setZoomMode(QPdfView.ZoomMode.Custom)
+                    self.setZoomFactor(zoom)
+                    self.pageNavigator().jump(self._pan_page, QPointF(x, y), zoom)
             event.accept()
             return
         if self._draw_start is not None:
