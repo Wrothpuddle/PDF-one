@@ -26,6 +26,8 @@ A table of every markup in the document showing page, type, subject, comment, au
 ### Measurement
 - **Scales are set per page.** Choose a standard scale (1/8" = 1'-0", 1/4" = 1'-0", 1" = 20', 1:100, …), enter a custom ratio, or use **Calibrate**: drag along a known dimension and type its real length (12'-6" style input is accepted). A scale can be applied to one page or every page.
 - **Tools:** Length, Polylength, Area, Volume (area × a depth set in Properties; shows cubic yards too for feet), Perimeter, Count, and Angle.
+- **Cutouts:** select an Area or Volume measurement, choose Add Cutout, and click around an opening (a shaft, a courtyard). The opening is subtracted from the total, shown as a lighter dashed patch, and moves, copies, and deletes along with its area.
+- **Viewports:** for sheets with several drawings at different scales, Add Viewport (Measure menu) draws a rectangle with its own scale. Measurements inside it use that scale; everything else uses the page scale. Viewports are outlined with their name and scale, and Viewports on This Page lets you rename, rescale, or delete them.
 - **Snap to Content** (F9, on by default) moves measurement and markup points onto line endpoints, midpoints, intersections, and existing markup vertices, with a marker showing what it snapped to. Hold Shift to place a point freely or snap to 45°.
 - **Updating and display:** values follow the page scale and recalculate when a measurement is moved or reshaped. Values display in feet-inches (to 1/16"), feet, inches, millimetres, centimetres, or metres. Length measurements show their value on the line in any PDF viewer; other measurements are labelled on the page in Northstar and store their value in the markup's comment.
 
@@ -114,6 +116,5 @@ See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 
 - **Document content:** digital signatures and certificate validation; Office and image conversion; OCR languages other than English (add `<lang>.traineddata` files to the `tessdata` folder).
 - **Multi-file and collaboration:** Sets (multi-file drawing packages) and real-time collaboration (left out on purpose to keep the app offline).
-- **Measurement:** separate scales for viewports within a page, and area cutouts.
 - **Text:** formatting individual words differently within one text box, and paragraph reflow when editing existing text.
 - **Standards:** PDF/A and PDF/X validation, and accessibility tagging.

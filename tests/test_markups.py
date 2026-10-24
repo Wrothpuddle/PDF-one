@@ -310,3 +310,56 @@ def test_reply_threads(session: PdfSession, tmp_path: Path) -> None:
     line = session.apply("Line", lambda doc: create_markup(doc[1], "line", [(1, 1), (50, 50)]))
     with pytest.raises(ValueError):
         session.apply("Empty reply", lambda doc: markups.add_reply(doc[1], line, "  "))
+
+
+def test_area_cutouts(session: PdfSession) -> None:
+    scale = markups.common_scale('1/4" = 1\'-0"')  # 18 pt per foot
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], scale))
+    area = session.apply("Area", lambda doc: create_markup(
+        doc[0], "area", [(100, 100), (280, 100), (280, 280), (100, 280)]))  # 10 x 10 ft
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(100)
+    cut = session.apply("Cutout", lambda doc: markups.add_cutout(
+        doc[0], area, [(118, 118), (154, 118), (154, 154), (118, 154)]))  # 2 x 2 ft
+    page = session.doc[0]
+    assert markups.measurement(page, area)[0] == pytest.approx(96)
+    assert page.load_annot(area).info["content"] == "96.00 sq ft"
+    assert [row["kind"] for row in markups.list_markups(session.doc)] == ["area"]
+    session.apply("Grow", lambda doc: markups.set_markup_points(
+        doc[0], cut, [(118, 118), (172, 118), (172, 154), (118, 154)]))  # 3 x 2 ft
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(94)
+    session.apply("Move", lambda doc: markups.move_markup(doc[0], area, 10, 0))
+    assert markups.markup_points(session.doc[0], cut)[0].x == pytest.approx(128)
+    session.apply("Scale 2", lambda doc: markups.set_page_scale(doc[1], scale))
+    copy = session.apply("Copy", lambda doc: markups.duplicate_markup(doc[0], area, target=doc[1]))
+    assert markups.measurement(session.doc[1], copy)[0] == pytest.approx(94)
+    session.apply("Delete cut", lambda doc: markups.delete_markup(doc[0], cut))
+    assert markups.measurement(session.doc[0], area)[0] == pytest.approx(100)
+    session.undo()
+    session.apply("Delete area", lambda doc: markups.delete_markup(doc[0], area))
+    assert not list(session.doc[0].annots())
+    line = session.apply("Line", lambda doc: create_markup(doc[0], "line", [(1, 1), (9, 9)]))
+    with pytest.raises(ValueError):
+        session.apply("Bad", lambda doc: markups.add_cutout(doc[0], line, [(1, 1), (5, 1), (5, 5)]))
+
+
+def test_viewport_scales(session: PdfSession) -> None:
+    page_scale = markups.common_scale('1/4" = 1\'-0"')        # 18 pt per foot
+    detail_scale = markups.common_scale('1" = 1\'-0"')        # 72 pt per foot
+    session.apply("Scale", lambda doc: markups.set_page_scale(doc[0], page_scale))
+    plan = session.apply("Plan", lambda doc: create_markup(doc[0], "length",
+                                                            [(50, 50), (122, 50)]))
+    detail = session.apply("Detail", lambda doc: create_markup(doc[0], "length",
+                                                                [(350, 450), (422, 450)]))
+    assert markups.measurement(session.doc[0], detail)[1] == "4'-0\""
+    session.apply("Viewport", lambda doc: markups.add_viewport(
+        doc[0], fitz.Rect(300, 400, 600, 700), detail_scale, "Detail 3"))
+    page = session.doc[0]
+    assert markups.measurement(page, plan)[1] == "4'-0\""     # outside: page scale
+    assert markups.measurement(page, detail)[1] == "1'-0\""   # inside: viewport scale
+    assert page.load_annot(detail).info["content"] == "1'-0\""
+    (viewport,) = markups.viewports(page)
+    assert viewport["name"] == "Detail 3" and viewport["scale"].label == '1" = 1\'-0"'
+    session.apply("Clear", lambda doc: markups.set_viewports(doc[0], []))
+    assert markups.measurement(session.doc[0], detail)[1] == "4'-0\""
+    session.undo()
+    assert markups.measurement(session.doc[0], detail)[1] == "1'-0\""

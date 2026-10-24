@@ -55,7 +55,8 @@ MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout"
 MEASURE_TOOLS = ["length", "polylength", "area", "volume", "perimeter", "count", "angle"]
 NAV_TOOLS = {"select": "Select", "pan": "Pan", "text_select": "Select Text",
              "zoom_area": "Zoom Area", "crop": "Crop", "snapshot": "Snapshot",
-             "calibrate": "Calibrate", "redact": "Redact", "link": "Link"}
+             "calibrate": "Calibrate", "redact": "Redact", "link": "Link",
+             "cutout": "Add Cutout", "viewport": "Add Viewport"}
 SHORTCUTS = {"select": "V", "pan": "H", "text_select": "Alt+T", "text": "T", "callout": "Q",
              "note": "N", "highlight": "Alt+H", "pen": "P", "line": "L", "arrow": "A",
              "polyline": "Alt+N", "polygon": "Shift+P", "cloud": "C", "rectangle": "R",
@@ -103,6 +104,7 @@ class MainWindow(QMainWindow):
         self.tool_styles: dict[str, Style] = {}
         self.clipboard: tuple[PdfSession, list[tuple[int, int]]] | None = None
         self._temp_files: list[Path] = []
+        self._cutout_parent: tuple[int, int] | None = None
         self._recovered: set[Path] = set()
         self.recovery = RecoveryStore(data_dir / "recovery") if recovery else None
         self._autosaved: dict[int, int] = {}  # id(session) -> revision written
@@ -289,6 +291,9 @@ class MainWindow(QMainWindow):
                              tip="Snap points to line endpoints, midpoints, and intersections")
         self.snap_action.setChecked(self.settings.value("snapToContent", True, type=bool))
         self.snap_action.toggled.connect(self._set_snap)
+        self.viewports_action = a("Show &Viewports", None, checkable=True)
+        self.viewports_action.setChecked(self.settings.value("showViewports", True, type=bool))
+        self.viewports_action.toggled.connect(self._set_show_viewports)
         self.find_action = a("&Find…", self._focus_search, QKeySequence.StandardKey.Find)
         self.find_next_action = a("Find &Next", lambda: self._step_search(1), "F3")
         self.find_prev_action = a("Find Pre&vious", lambda: self._step_search(-1), "Shift+F3")
@@ -403,10 +408,14 @@ class MainWindow(QMainWindow):
         measure = bar.addMenu("Mea&sure")
         measure.addAction(self.tool_actions["calibrate"])
         self._doc_menu_action(measure, "Set Scale…", self._set_scale)
+        measure.addAction(self.tool_actions["viewport"])
+        self._doc_menu_action(measure, "Viewports on This Page…", self._manage_viewports)
+        measure.addAction(self.viewports_action)
         measure.addAction(self.snap_action)
         measure.addSeparator()
         for kind in MEASURE_TOOLS:
             measure.addAction(self.tool_actions[kind])
+        measure.addAction(self.tool_actions["cutout"])
 
         tools = bar.addMenu("&Tools")
         tools.addAction(self.tool_actions["snapshot"])
@@ -510,10 +519,12 @@ class MainWindow(QMainWindow):
         self.scale_button = QAction("Scale: 1:1", self)
         self.scale_button.triggered.connect(self._set_scale)
         measure.addAction(self.scale_button)
+        measure.addAction(self.tool_actions["viewport"])
         measure.addAction(self.snap_action)
         measure.addSeparator()
         for kind in MEASURE_TOOLS:
             measure.addAction(self.tool_actions[kind])
+        measure.addAction(self.tool_actions["cutout"])
         measure.addSeparator()
         for kind in ("snapshot", "crop", "link", "redact"):
             measure.addAction(self.tool_actions[kind])
@@ -607,6 +618,7 @@ class MainWindow(QMainWindow):
         canvas.set_tool(self.tool if self.tool not in ("crop",) else "select")
         canvas.ortho = self.ortho_action.isChecked()
         canvas.set_snap(self.snap_action.isChecked())
+        canvas.show_viewports = self.viewports_action.isChecked()
         if title is None:
             self._remember_recent(path)
         self.settings.setValue("lastDirectory", str(Path(path).parent))
@@ -932,6 +944,12 @@ class MainWindow(QMainWindow):
     def _toggle_full_screen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
+    def _set_show_viewports(self, on: bool) -> None:
+        self.settings.setValue("showViewports", on)
+        for view in self.views():
+            view.canvas.show_viewports = on
+            view.canvas.refresh_overlays()
+
     def _set_snap(self, on: bool) -> None:
         self.settings.setValue("snapToContent", on)
         for view in self.views():
@@ -967,6 +985,8 @@ class MainWindow(QMainWindow):
 
     # -- tools ------------------------------------------------------------------------
     def set_tool(self, kind: str, style: Style | None = None) -> None:
+        if kind == "cutout" and not self._prepare_cutout():
+            kind = "select"
         if style is not None:
             self.tool_styles[kind] = style
         self.tool = kind
@@ -1085,6 +1105,18 @@ class MainWindow(QMainWindow):
 
     def _create_markup(self, view: DocumentView, kind: str, page: int, points: list,
                        text: str) -> None:
+        if kind == "cutout":
+            parent_page, parent = self._cutout_parent or (-1, 0)
+            if page != parent_page:
+                QMessageBox.warning(self, "Add cutout",
+                                    "Draw the cutout on the same page as its area.")
+                return
+            created = self._apply(view, "Add Cutout", lambda doc: markups.add_cutout(
+                doc[page], parent, points, self.user_name))
+            if created and not self.tool_locked:
+                self.set_tool("select")
+                view.canvas.set_selection([(page, parent)])
+            return
         if kind not in KIND_LABELS:
             return
         style = Style.from_dict(self.style_for(kind).to_dict())
@@ -1347,6 +1379,10 @@ class MainWindow(QMainWindow):
                 status.addAction(name or "(clear)",
                                  lambda s=name: self._set_status(self._selection(), s))
             menu.addAction("Add to Tool Chest…", self._save_tool)
+            page_index, xref = view.canvas.selection[0]
+            pdf_page = view.session.doc[page_index]
+            if markups.markup_kind(pdf_page, pdf_page.load_annot(xref)) in markups.CUTOUT_PARENTS:
+                menu.addAction("Add Cutout", lambda: self.set_tool("cutout"))
         else:
             menu.addAction(self.paste_action)
             menu.addAction(self.select_all_action)
@@ -1363,6 +1399,25 @@ class MainWindow(QMainWindow):
             offset = pdf_page.cropbox.tl
             mediabox_rect = fitz.Rect(rect) + (offset.x, offset.y, offset.x, offset.y)
             self._apply(view, "Crop", lambda doc: ops.crop_page(doc, page, mediabox_rect))
+            self.set_tool("select")
+        elif purpose == "viewport":
+            pdf_page = view.session.doc[page]
+            dialog = ScaleDialog(markups.page_scale(pdf_page), 1, self)
+            dialog.setWindowTitle("Viewport scale")
+            dialog.this_page.hide()
+            dialog.all_pages.hide()
+            if dialog.exec():
+                name, accepted = QInputDialog.getText(
+                    self, "Viewport", "Viewport name:",
+                    text=f"Viewport {len(markups.viewports(pdf_page)) + 1}")
+                if accepted:
+                    try:
+                        scale = dialog.scale()
+                    except ValueError as exc:
+                        QMessageBox.warning(self, "Viewport", str(exc))
+                    else:
+                        self._apply(view, "Add Viewport", lambda doc: markups.add_viewport(
+                            doc[page], rect, scale, name.strip()))
             self.set_tool("select")
         elif purpose == "link":
             count = view.session.page_count
@@ -1975,6 +2030,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Recognize text",
                                     "No text was recognized. If a page shows sideways, rotate "
                                     "it to read upright first.")
+
+    def _prepare_cutout(self) -> bool:
+        """Remember the selected area/volume that a new cutout will be subtracted from."""
+        view = self.view()
+        selection = self._selection()
+        if view is not None and len(selection) == 1:
+            page, xref = selection[0]
+            pdf_page = view.session.doc[page]
+            if markups.markup_kind(pdf_page, pdf_page.load_annot(xref)) in markups.CUTOUT_PARENTS:
+                self._cutout_parent = (page, xref)
+                return True
+        if view is not None and self.tool == "cutout" and self._cutout_parent:
+            return True  # tool lock: keep cutting the same area
+        QMessageBox.information(self, "Add cutout",
+                                "Select an Area or Volume measurement first, then choose "
+                                "Add Cutout and click around the opening.")
+        return False
+
+    def _manage_viewports(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        page = view.canvas.current_page
+        items = markups.viewports(view.session.doc[page])
+        if not items:
+            QMessageBox.information(self, "Viewports",
+                                    "This page has no viewports. Use Measure → Add Viewport and "
+                                    "drag around a drawing that has its own scale.")
+            return
+        from dialogs import ViewportsDialog
+        dialog = ViewportsDialog(items, self)
+        if dialog.exec():
+            edited = dialog.items
+            self._apply(view, "Edit Viewports",
+                        lambda doc: markups.set_viewports(doc[page], edited))
 
     def _auto_link(self) -> None:
         view = self.view()

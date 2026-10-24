@@ -224,6 +224,19 @@ def _draw(name: str, p: QPainter, fg: QColor) -> None:
         p.drawEllipse(QPointF(8, 9.5), 2, 2)
         p.setBrush(GREEN)
         p.drawPolygon(_poly((4, 18), (10, 11), (14, 15), (16, 13), (20, 18)))
+    elif name == "cutout":
+        p.setPen(_pen(BLUE, 1.6))
+        p.setBrush(QColor(31, 111, 235, 80))
+        p.drawRect(QRectF(3, 4, 18, 16))
+        p.setPen(_pen(BLUE, 1.3, Qt.PenStyle.DashLine))
+        p.setBrush(QBrush(QColor("white")))
+        p.drawRect(QRectF(8, 8, 8, 7))
+    elif name == "viewport":
+        p.setPen(_pen(QColor("#7b2cbf"), 1.4, Qt.PenStyle.DashDotLine))
+        p.drawRect(QRectF(3, 6, 18, 14))
+        p.setFont(QFont("Arial", 6, QFont.Weight.Bold))
+        p.setPen(_pen(QColor("#7b2cbf"), 1))
+        p.drawText(QRectF(3, 0, 18, 7), Qt.AlignmentFlag.AlignLeft, "1:50")
     elif name == "lock":
         p.drawRoundedRect(QRectF(5, 11, 14, 10), 2, 2)
         p.drawArc(QRectF(8, 4, 8, 12), 0, 180 * 16)
@@ -281,5 +294,5 @@ ICON_NAMES = ["select", "pan", "text_select", "zoom_area", "zoom_in", "zoom_out"
               "fit_page", "prev_page", "next_page", "crop", "snapshot", "calibrate", "redact",
               "text", "callout", "note", "highlight", "underline", "strikeout", "pen",
               "highlighter", "line", "arrow", "polyline", "polygon", "cloud", "rectangle",
-              "ellipse", "stamp", "image", "link", "volume", "length", "polylength", "area", "perimeter", "count", "angle",
+              "ellipse", "stamp", "image", "link", "volume", "cutout", "viewport", "length", "polylength", "area", "perimeter", "count", "angle",
               "lock", "snap", "undo", "redo", "open", "save", "print"]

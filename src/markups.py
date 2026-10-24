@@ -32,6 +32,8 @@ import pymupdf as fitz
 
 KIND_KEY = "NSKind"
 DEPTH_KEY = "NSDepth"
+PARENT_KEY = "NSParent"        # cutout -> the area/volume it is subtracted from
+VIEWPORTS_KEY = "NSViewports"  # page -> JSON list of {name, rect, scale}
 STATUS_KEY = "NSStatus"
 SCALE_KEY = "NSScale"
 
@@ -45,7 +47,7 @@ KIND_LABELS = {
     "stamp": "Stamp", "redact": "Redaction",
     "length": "Length", "polylength": "Polylength", "area": "Area",
     "perimeter": "Perimeter", "count": "Count", "angle": "Angle", "volume": "Volume",
-    "image": "Image",
+    "image": "Image", "cutout": "Cutout",
 }
 
 # How each kind is drawn: by dragging a box, dragging two points, clicking a
@@ -54,11 +56,12 @@ DRAG_RECT = {"text", "rectangle", "ellipse", "stamp", "image", "redact",
              "highlight", "underline", "strikeout", "squiggly"}
 DRAG_LINE = {"line", "arrow", "length", "callout"}
 CLICK_POINTS = {"polyline", "polygon", "cloud", "polylength", "area", "perimeter", "angle",
-                "volume"}
+                "volume", "cutout"}
 FREEHAND = {"pen", "highlighter"}
 SINGLE_CLICK = {"note", "count"}
 MEASURE_KINDS = {"length", "polylength", "area", "perimeter", "count", "angle", "volume"}
-CLOSED_KINDS = {"polygon", "cloud", "area", "perimeter", "volume"}
+CLOSED_KINDS = {"polygon", "cloud", "area", "perimeter", "volume", "cutout"}
+CUTOUT_PARENTS = {"area", "volume"}
 TEXT_MARKUP_KINDS = {"highlight", "underline", "strikeout", "squiggly"}
 
 STAMPS = ["Approved", "AsIs", "Confidential", "Departmental", "Experimental", "Expired",
@@ -692,8 +695,13 @@ def move_markup(page: fitz.Page, xref: int, dx: float, dy: float) -> None:
         kind, value = doc.xref_get_key(popup, "Rect")
         if kind == "array":
             doc.xref_set_key(popup, "Rect", _shift_array(value, pdf_dx, pdf_dy))
-    if markup_kind(page, get_annot(page, xref)) in MEASURE_KINDS:
+    kind = markup_kind(page, get_annot(page, xref))
+    if kind in CUTOUT_PARENTS:
+        for cutout in cutouts(page, xref):
+            move_markup(page, cutout, dx, dy)
+    if kind in MEASURE_KINDS:
         refresh_measurement(page, xref)
+    _refresh_cutout_parent(page, xref)
 
 
 def set_markup_points(page: fitz.Page, xref: int, points) -> None:
@@ -722,6 +730,7 @@ def set_markup_points(page: fitz.Page, xref: int, points) -> None:
     apply_style(page, xref, style)
     if markup_kind(page, get_annot(page, xref)) in MEASURE_KINDS:
         refresh_measurement(page, xref)
+    _refresh_cutout_parent(page, xref)
 
 
 def resize_markup(page: fitz.Page, xref: int, new_rect: fitz.Rect) -> None:
@@ -775,10 +784,112 @@ def resize_markup(page: fitz.Page, xref: int, new_rect: fitz.Rect) -> None:
 
 
 def delete_markup(page: fitz.Page, xref: int) -> None:
-    """Delete a markup together with its replies."""
+    """Delete a markup together with its replies and cutouts."""
+    parent = _cutout_parent(page, xref)
     for reply in replies(page, xref):
         page.delete_annot(get_annot(page, reply["xref"]))
+    for cutout in cutouts(page, xref):
+        page.delete_annot(get_annot(page, cutout))
     page.delete_annot(get_annot(page, xref))
+    if parent:
+        refresh_measurement(page, parent)
+
+
+# -- cutouts -----------------------------------------------------------------------
+
+def _cutout_parent(page: fitz.Page, xref: int) -> int:
+    value = _get_string(page.parent, xref, PARENT_KEY)
+    return int(value) if value.isdigit() else 0
+
+
+def cutouts(page: fitz.Page, xref: int) -> list[int]:
+    """Cutouts subtracted from an area or volume measurement."""
+    target = str(xref)
+    return [annot.xref for annot in page.annots() or []
+            if _get_string(page.parent, annot.xref, PARENT_KEY) == target]
+
+
+def add_cutout(page: fitz.Page, parent: int, points, author: str = "") -> int:
+    """Draw an opening inside an area/volume measurement and subtract it."""
+    parent_annot = get_annot(page, parent)
+    if markup_kind(page, parent_annot) not in CUTOUT_PARENTS:
+        raise ValueError("Cutouts can only be added to Area or Volume measurements.")
+    style = read_style(page, parent)
+    style.fill, style.opacity, style.dash = "#ffffff", 0.75, "dashed"
+    style.subject = "Cutout"
+    xref = create_markup(page, "cutout", points, style, author=author)
+    _set_string(page.parent, xref, PARENT_KEY, str(parent))
+    refresh_measurement(page, parent)
+    return xref
+
+
+def _refresh_cutout_parent(page: fitz.Page, xref: int) -> None:
+    parent = _cutout_parent(page, xref)
+    if parent:
+        try:
+            refresh_measurement(page, parent)
+        except LookupError:
+            pass
+
+
+# -- viewports -----------------------------------------------------------------------
+
+def viewports(page: fitz.Page) -> list[dict]:
+    """Rectangles with their own scale: [{'name', 'rect' (fitz.Rect), 'scale' (Scale)}]."""
+    text = _get_string(page.parent, page.xref, VIEWPORTS_KEY)
+    if not text:
+        return []
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return []
+    found = []
+    for item in items:
+        try:
+            found.append({"name": str(item.get("name", "Viewport")),
+                          "rect": fitz.Rect(item["rect"]),
+                          "scale": Scale(**{k: item["scale"][k] for k in
+                                            ("units_per_point", "unit", "label", "precision")
+                                            if k in item["scale"]})})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return found
+
+
+def set_viewports(page: fitz.Page, items: list[dict]) -> None:
+    data = [{"name": item["name"], "rect": list(fitz.Rect(item["rect"])),
+             "scale": asdict(item["scale"])} for item in items]
+    _set_string(page.parent, page.xref, VIEWPORTS_KEY, json.dumps(data) if data else "")
+    _refresh_page_measurements(page)
+
+
+def add_viewport(page: fitz.Page, rect, scale: Scale, name: str = "") -> None:
+    rect = fitz.Rect(rect).normalize()
+    if rect.width < 10 or rect.height < 10:
+        raise ValueError("Drag a larger viewport.")
+    items = viewports(page)
+    items.append({"name": name or f"Viewport {len(items) + 1}", "rect": rect, "scale": scale})
+    set_viewports(page, items)
+
+
+def scale_at(page: fitz.Page, point) -> Scale:
+    """The scale for a point: the smallest viewport containing it, else the page scale."""
+    point = fitz.Point(point)
+    containing = [item for item in viewports(page) if item["rect"].contains(point)]
+    if containing:
+        return min(containing, key=lambda item: item["rect"].width * item["rect"].height)["scale"]
+    return page_scale(page)
+
+
+def markup_scale(page: fitz.Page, xref: int) -> Scale:
+    """Scale used by a measurement: the viewport around its centre, else the page's."""
+    return scale_at(page, label_anchor(page, xref))
+
+
+def _refresh_page_measurements(page: fitz.Page) -> None:
+    for annot in list(page.annots() or []):
+        if markup_kind(page, annot) in MEASURE_KINDS:
+            refresh_measurement(page, annot.xref)
 
 
 # -- replies -------------------------------------------------------------------
@@ -851,6 +962,9 @@ def duplicate_markup(page: fitz.Page, xref: int, dx: float = 12, dy: float = 12,
         set_status(target, new_xref, status)
     if kind == "text":
         resize_markup(target, new_xref, annot.rect + (dx, dy, dx, dy))
+    for cutout in cutouts(page, xref):
+        add_cutout(target, new_xref, [point + (dx, dy) for point in markup_points(page, cutout)],
+                   author=info.get("title", ""))
     return new_xref
 
 
@@ -1056,7 +1170,7 @@ def measurement(page: fitz.Page, xref: int) -> tuple[float, str] | None:
     kind = markup_kind(page, annot)
     if kind not in MEASURE_KINDS:
         return None
-    scale = page_scale(page)
+    scale = markup_scale(page, xref)
     points = markup_points(page, xref)
     if kind == "count":
         return 1.0, "1"
@@ -1069,15 +1183,19 @@ def measurement(page: fitz.Page, xref: int) -> tuple[float, str] | None:
         degrees = abs(math.degrees(first - second)) % 360
         degrees = 360 - degrees if degrees > 180 else degrees
         return degrees, f"{degrees:.1f}°"
+    if kind in CUTOUT_PARENTS:
+        net = _polygon_area(points) - sum(_polygon_area(markup_points(page, cut))
+                                          for cut in cutouts(page, xref))
+        net = max(0.0, net)
     if kind == "area":
-        value = _polygon_area(points) * scale.units_per_point ** 2
+        value = net * scale.units_per_point ** 2
         return value, format_area(value, scale.unit, scale.precision)
     if kind == "volume":
         try:
             depth = float(_get_string(page.parent, xref, DEPTH_KEY) or 1.0)
         except ValueError:
             depth = 1.0
-        value = _polygon_area(points) * scale.units_per_point ** 2 * depth
+        value = net * scale.units_per_point ** 2 * depth
         return value, format_volume(value, scale.unit, scale.precision)
     value = _polyline_length(points, closed=kind == "perimeter") * scale.units_per_point
     return value, format_length(value, scale.unit, scale.precision)
@@ -1135,8 +1253,8 @@ def list_markups(doc: fitz.Document) -> list[dict]:
             if _is_reply(annot):
                 reply_counts[annot.irt_xref] = reply_counts.get(annot.irt_xref, 0) + 1
         for annot in annots:
-            if _is_reply(annot):
-                continue
+            if _is_reply(annot) or _get_string(doc, annot.xref, PARENT_KEY):
+                continue  # replies and cutouts belong to another markup's row
             kind = markup_kind(page, annot)
             info = annot.info
             colors = annot.colors or {}
@@ -1154,7 +1272,7 @@ def list_markups(doc: fitz.Document) -> list[dict]:
                 "color": rgb_to_hex(colors.get("stroke") or colors.get("fill")),
                 "measurement": result[1] if result else "",
                 "value": result[0] if result else None,
-                "unit": page_scale(page).unit if result else "",
+                "unit": markup_scale(page, annot.xref).unit if result else "",
                 "replies": reply_counts.get(annot.xref, 0),
             })
     return rows

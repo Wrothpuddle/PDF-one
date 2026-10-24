@@ -336,3 +336,69 @@ class BatchDialog(QDialog):
                             flatten=self.flatten.isChecked(), password=self.password.text(),
                             summary=self.summary.isChecked(), csv=self.csv.isChecked(),
                             source_password=self.source_password.text())
+
+
+class ViewportsDialog(QDialog):
+    """Rename, rescale, or delete the viewports on one page."""
+
+    def __init__(self, items: list[dict], parent=None) -> None:
+        from PySide6.QtWidgets import QInputDialog, QListWidget, QPushButton
+        super().__init__(parent)
+        self.setWindowTitle("Viewports on this page")
+        self.resize(460, 320)
+        self.items = [dict(item) for item in items]
+        self._input = QInputDialog
+        self.list = QListWidget()
+        rename = QPushButton("Rename…")
+        rescale = QPushButton("Change Scale…")
+        delete = QPushButton("Delete")
+        rename.clicked.connect(self._rename)
+        rescale.clicked.connect(self._rescale)
+        delete.clicked.connect(self._delete)
+        row = QHBoxLayout()
+        for button in (rename, rescale, delete):
+            row.addWidget(button)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(row)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        current = self.list.currentRow()
+        self.list.clear()
+        for item in self.items:
+            self.list.addItem(f"{item['name']}  —  {item['scale'].label}")
+        if self.items:
+            self.list.setCurrentRow(max(0, min(current, len(self.items) - 1)))
+
+    def _rename(self) -> None:
+        row = self.list.currentRow()
+        if row < 0:
+            return
+        name, accepted = self._input.getText(self, "Rename viewport", "Name:",
+                                             text=self.items[row]["name"])
+        if accepted and name.strip():
+            self.items[row]["name"] = name.strip()
+            self._refresh()
+
+    def _rescale(self) -> None:
+        row = self.list.currentRow()
+        if row < 0:
+            return
+        dialog = ScaleDialog(self.items[row]["scale"], 1, self)
+        dialog.this_page.hide()
+        dialog.all_pages.hide()
+        if dialog.exec():
+            self.items[row]["scale"] = dialog.scale()
+            self._refresh()
+
+    def _delete(self) -> None:
+        row = self.list.currentRow()
+        if row >= 0:
+            del self.items[row]
+            self._refresh()

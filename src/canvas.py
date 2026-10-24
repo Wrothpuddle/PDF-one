@@ -151,6 +151,7 @@ class PdfCanvas(QGraphicsView):
         self.selection: list[tuple[int, int]] = []  # (page, xref)
         self.ortho = False
         self.snap_enabled = True
+        self.show_viewports = True
         self._snap_content: dict[int, tuple[tuple, list]] = {}
         self._snap_index: dict[int, snap.SnapIndex] = {}
         self._snap_exclude: set[int] = set()
@@ -560,7 +561,7 @@ class PdfCanvas(QGraphicsView):
 
     def _drawing_kind(self) -> str:
         return {"calibrate": "line", "crop": "rect", "snapshot": "rect",
-                "zoom_area": "rect", "link": "rect"}.get(self.tool, self.tool)
+                "zoom_area": "rect", "link": "rect", "viewport": "rect"}.get(self.tool, self.tool)
 
     def _ensure_preview(self, kind: str) -> QGraphicsPathItem:
         if self._preview is None:
@@ -707,7 +708,30 @@ class PdfCanvas(QGraphicsView):
         if document:
             self._clear_items(self._labels)
             self._draw_measure_labels()
+            if self.show_viewports:
+                self._draw_viewports()
             self._redraw_search()
+
+    def _draw_viewports(self) -> None:
+        doc = self.session.doc
+        colour = QColor("#7b2cbf")
+        for item in self.pages:
+            if item.index >= doc.page_count:
+                continue
+            for viewport in markups.viewports(doc[item.index]):
+                rect = self.visual_rect(item.index, viewport["rect"]).translated(item.pos())
+                pen = QPen(colour, 1.2, Qt.PenStyle.DashDotLine)
+                pen.setCosmetic(True)
+                outline = self.scene().addRect(rect, pen)
+                outline.setZValue(29)
+                label = QGraphicsSimpleTextItem(f"{viewport['name']} · {viewport['scale'].label}")
+                label.setBrush(colour)
+                label.setFont(QFont("Segoe UI", 8))
+                label.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                label.setPos(rect.topLeft())
+                label.setZValue(29)
+                self.scene().addItem(label)
+                self._labels.extend((outline, label))
 
     def _draw_measure_labels(self) -> None:
         doc = self.session.doc
@@ -1107,7 +1131,7 @@ class PdfCanvas(QGraphicsView):
             return
         end = self.to_page(index, end_local)
         rect = fitz.Rect(start_page, end).normalize()
-        if self.tool in ("crop", "snapshot", "zoom_area", "link"):
+        if self.tool in ("crop", "snapshot", "zoom_area", "link", "viewport"):
             if moved:
                 if self.tool == "zoom_area":
                     self._zoom_to(index, rect)
