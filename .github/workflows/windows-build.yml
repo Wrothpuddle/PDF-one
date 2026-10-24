@@ -28,6 +28,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
       - name: Run app self-test from source
+        timeout-minutes: 5
         env:
           QT_QPA_PLATFORM: offscreen
         run: python src/main.py --self-test
@@ -40,6 +41,7 @@ jobs:
           --hidden-import PySide6.QtTest
           src/main.py
       - name: Smoke test packaged executable
+        timeout-minutes: 5
         env:
           QT_QPA_PLATFORM: offscreen
         shell: pwsh

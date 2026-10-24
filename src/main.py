@@ -1722,10 +1722,38 @@ def _report_self_test(checks: list[tuple[str, bool]]) -> int:
     return 0 if all(ok for _name, ok in checks) else 1
 
 
+def _non_blocking_dialogs(messages: list[str]) -> None:
+    """Record message boxes instead of showing them, so CI can never hang on one."""
+    def recorder(kind: str):
+        def show(_parent, title, text, *_args, **_kwargs):
+            messages.append(f"{kind} - {title}: {text}")
+            return QMessageBox.StandardButton.Cancel
+        return staticmethod(show)
+
+    for kind in ("warning", "critical", "information", "question"):
+        setattr(QMessageBox, kind, recorder(kind))
+
+
+def _start_watchdog(seconds: float) -> None:
+    """Fail (and still write the report) if the self-test stops responding."""
+    import threading
+
+    def expire() -> None:
+        _report_self_test([(f"Self-test finished within {seconds:.0f} s", False)])
+        os._exit(2)
+
+    timer = threading.Timer(seconds, expire)
+    timer.daemon = True
+    timer.start()
+
+
 def self_test() -> int:
     """Drive the real window with simulated mouse input; used by the build workflow."""
     from PySide6.QtTest import QTest
 
+    _start_watchdog(180)
+    dialogs: list[str] = []
+    _non_blocking_dialogs(dialogs)
     app = QApplication.instance() or QApplication([])
     app.setOrganizationName("Northstar")
     app.setApplicationName("NorthstarPDF-SelfTest")
@@ -1851,6 +1879,9 @@ def self_test() -> int:
         checks.append(("Sharp render at high zoom", any(item.detail is not None or
                                                         item.base_scale >= canvas.zoom * 0.99
                                                         for item in canvas.pages if item.base)))
+        checks.append(("No unexpected message boxes", not dialogs))
+        for message in dialogs:
+            print("Message box:", message)
     except Exception as exc:  # report rather than crash so CI shows which step broke
         import traceback
         traceback.print_exc()
