@@ -29,7 +29,7 @@ def test_formatted_text_box_is_visible_and_retains_styles(tmp_path: Path) -> Non
         "letter_spacing": 1.5, "line_spacing": 1.4, "alignment": "center",
     }
     add_rich_text_box(source, output, 0, (72, 500, 360, 700),
-                      "Live preview\\nsecond line", style)
+                      "Live preview\nsecond line", style)
     annotation = PdfReader(output).pages[0]["/Annots"][0].get_object()
     assert annotation["/Subtype"] == "/FreeText"
     rich = str(annotation["/RC"])
