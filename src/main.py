@@ -15,7 +15,7 @@ from pypdf import PdfReader
 from edit_session import EditSession
 
 from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSettings, QTimer, Signal
-from PySide6.QtGui import (QAction, QKeySequence, QCloseEvent, QFont, QKeyEvent,
+from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QCloseEvent, QFont, QKeyEvent,
                            QTextBlockFormat, QTextCharFormat, QTextCursor)
 from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
 from PySide6.QtPdfWidgets import QPdfView
@@ -734,7 +734,16 @@ class MainWindow(QMainWindow):
         export_text_action = tools_menu.addAction("Export text…")
         export_text_action.triggered.connect(self._export_text)
         comment_menu = self.menuBar().addMenu("&Comment")
+        self.annotation_action_group = QActionGroup(self)
+        self.annotation_action_group.setExclusive(True)
         annotation_actions = {}
+        select_action = comment_menu.addAction("Select tool")
+        select_action.setCheckable(True)
+        select_action.setChecked(True)
+        select_action.triggered.connect(lambda: self._activate_annotation_tool("select"))
+        self.annotation_action_group.addAction(select_action)
+        annotation_actions["Select"] = select_action
+        self.annotation_actions_by_kind = {"select": select_action}
         for label, kind in (
             ("Place text box", "text"), ("Place note", "note"),
             ("Highlight region", "highlight"), ("Underline region", "underline"),
@@ -743,6 +752,9 @@ class MainWindow(QMainWindow):
             ("Rectangle", "rectangle"), ("Ellipse", "ellipse"),
         ):
             action = comment_menu.addAction(label)
+            action.setCheckable(True)
+            self.annotation_action_group.addAction(action)
+            self.annotation_actions_by_kind[kind] = action
             action.triggered.connect(
                 lambda checked=False, selected=kind: self._activate_annotation_tool(selected)
             )
@@ -765,8 +777,10 @@ class MainWindow(QMainWindow):
 
         # Shared action registry feeds the floating task tools panel. Each button
         # invokes the same QAction as its menu/toolbar counterpart.
+        self.annotation_actions = annotation_actions
         self.tool_actions = {
             "Open": open_action, "Save": save_action,
+            "Select": select_action,
             "Undo": self.undo_action, "Redo": self.redo_action,
             "Rotate page": rotate_action, "Delete page": delete_action,
             "Sticky note": note_action, "Extract page": extract_action,
@@ -788,12 +802,17 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Workspaces", self)
         bar.setObjectName("WorkspaceTabsToolbar")
         bar.setMovable(False)
+        bar.setStyleSheet(
+            "QToolBar#WorkspaceTabsToolbar { background:#dfe8ef; border-bottom:1px solid #aab9c4; }"
+            "QTabBar::tab { padding:8px 18px; color:#263744; }"
+            "QTabBar::tab:selected { background:white; color:#1264a3; border-bottom:3px solid #1683d8; }"
+        )
         self.workspace_tabs = QTabBar(bar)
         self.workspace_tabs.setObjectName("WorkspaceTabs")
         self.workspace_tabs.setShape(QTabBar.Shape.RoundedNorth)
         self.workspace_tabs.setExpanding(False)
         self.workspace_tabs.setDrawBase(False)
-        for name in ("Home", "Read", "Edit", "Organize", "Comment", "Fill & Sign", "Protect", "Create & Convert"):
+        for name in ("Home", "Document", "Markup", "Tool Chest"):
             self.workspace_tabs.addTab(name)
         self.workspace_tabs.currentChanged.connect(self._set_workspace)
         bar.addWidget(self.workspace_tabs)
@@ -818,26 +837,27 @@ class MainWindow(QMainWindow):
         self.tool_layout.setSpacing(7)
         self.tool_scroll.setWidget(self.tool_content)
         self.tool_dock.setWidget(self.tool_scroll)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tool_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.tool_dock)
+        self.tabifyDockWidget(self.nav_dock, self.tool_dock)
+        self.nav_dock.raise_()
 
     def _set_workspace(self, index: int) -> None:
         if not hasattr(self, "workspace_tabs"):
             return
         name = self.workspace_tabs.tabText(index)
         presets = {
-            "Home": ("Open", "Save"),
-            "Read": ("Find text", "Previous match", "Next match", "Full screen"),
-            "Edit": ("Rotate page", "Fill form", "Export text", "Undo", "Redo"),
-            "Organize": ("Rotate page", "Reorder pages", "Insert pages", "Replace page",
-                         "Extract page", "Delete page", "Crop page", "Split PDF", "Merge PDFs", "Undo", "Redo"),
-            "Comment": ("Place text box", "Place note", "Highlight region",
-                         "Underline region", "Strikethrough region", "Freehand pen",
-                         "Line", "Arrow", "Rectangle", "Ellipse", "Sticky note", "Undo", "Redo"),
-            "Fill & Sign": ("Fill form", "Save", "Undo", "Redo"),
-            "Protect": ("Protect copy", "Save", "Export text"),
-            "Create & Convert": ("Merge PDFs", "Split PDF", "Extract page", "Export text"),
+            "Home": ("Open", "Save", "Undo", "Redo"),
+            "Document": ("Find text", "Previous match", "Next match", "Rotate page",
+                         "Reorder pages", "Insert pages", "Replace page", "Extract page",
+                         "Delete page", "Crop page", "Split PDF", "Merge PDFs"),
+            "Markup": ("Select", "Place text box", "Place note", "Highlight region",
+                       "Underline region", "Strikethrough region", "Freehand pen",
+                       "Line", "Arrow", "Rectangle", "Ellipse", "Undo", "Redo"),
+            "Tool Chest": ("Select", "Place text box", "Place note", "Highlight region",
+                           "Underline region", "Strikethrough region", "Freehand pen",
+                           "Line", "Arrow", "Rectangle", "Ellipse"),
         }
-        self.tool_dock.setWindowTitle(f"Tools · {name}")
+        self.tool_dock.setWindowTitle(f"Tool Chest · {name}")
         while self.tool_layout.count():
             item = self.tool_layout.takeAt(0)
             widget = item.widget()
