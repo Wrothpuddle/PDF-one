@@ -35,13 +35,9 @@ jobs:
         run: >-
           pyinstaller --noconfirm --clean --windowed --onefile
           --name NorthstarPDF
-          --collect-all PySide6.QtPdf
-          --collect-all PySide6.QtPdfWidgets
-          --collect-all cryptography
+          --paths src
           --collect-all pymupdf
-          --hidden-import fitz
-          --hidden-import PySide6.QtPdf
-          --hidden-import PySide6.QtPdfWidgets
+          --hidden-import PySide6.QtTest
           src/main.py
       - name: Smoke test packaged executable
         env:

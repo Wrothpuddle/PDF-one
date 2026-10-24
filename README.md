@@ -1,30 +1,51 @@
 # Northstar PDF
 
-Northstar PDF is an original-brand, offline-first Windows PDF editor. It opens PDFs locally, has no sign-in or online-facing features, and stages supported edits in a temporary working copy until you save.
+Northstar PDF is an offline Windows PDF markup, measurement, and review app modelled on the Bluebeam Revu workflow. It opens PDFs locally, has no sign-in or online features, and keeps edits in memory, with undo, until you save.
 
-## Available in the current build
+## Features
 
-- Multiple document tabs, continuous or single-page view, fit-to-width/page and 100% zoom, page navigation, scroll-wheel zoom, middle-button drag panning, full screen, dark theme, recent files, and built-in text search.
-- Bookmark navigation, selectable/copyable text where the PDF contains a text layer, and page labels in the viewer.
-- Current-page rotation and deletion, arbitrary page reordering, crop-box adjustment, insert/replace/extract page operations, splitting into one-page PDFs, and merging PDFs.
-- Comment workspace tools for text boxes, sticky notes, highlight, underline, strikethrough, freehand pen, lines, arrows, rectangles, and ellipses. Select a tool, then click or drag on the page; press Esc to exit the active tool. These are PDF annotations and remain undoable until saved.
-- Form field inspection/filling and plain-text export.
-- Staged edits with disk-backed undo/redo. Ctrl+S writes edits back to the same PDF; Save/Discard/Cancel is offered when closing a dirty document. Separate exports such as merge, split, extract, and text export ask for output paths.
-- Password-protected source PDFs can be opened with a password; supported edit operations preserve encryption using AES-256.
+### Live markups
+Every markup is a real PDF annotation. It stays selectable and editable after saving, and other PDF viewers (Acrobat, Bluebeam, browsers) show it the same way.
 
-The crop operation changes the visible crop box; underlying content outside the box remains in the PDF and can be revealed by changing the crop. It is not secure redaction. Rebuilding page sequences may not preserve every advanced PDF feature (for example, all document-level metadata, named destinations, or complex forms).
+- **Tools:** Text Box, Callout, Note, Highlight / Underline / Strikethrough (these snap to the words under the drag), Pen, Highlighter, Line, Arrow, Polyline, Polygon, Cloud, Rectangle, Ellipse, Stamps (Approved, Draft, For Comment, and more), and Redaction.
+- **Select tool:** click to select (Shift/Ctrl adds to the selection), drag a box to select several markups, drag to move, drag corner handles to resize, and drag vertex handles to reshape lines, polylines, polygons, and clouds. Arrow keys nudge (Shift moves 10 pt). Delete removes markups, Ctrl+D duplicates, Ctrl+C / Ctrl+V copy and paste (also between documents), and F2 or a double-click edits text.
+- **Tool Lock** (Ctrl+L) keeps a tool active after each use; otherwise the app returns to Select and selects the new markup. Hold **Shift** or turn on **Ortho** (F8) to snap lines to 45° steps.
 
-## Task workspaces and tool palette
+### Properties panel
+Shows the selected markup, or the active tool's defaults when nothing is selected. You can change the subject, line colour, fill, line width, opacity, line style (solid, dashed, or dotted), line ends, font (Helvetica, Courier, or Times), font size, text colour, alignment, stamp, status, and comment. Changes apply to every selected markup and can be undone.
 
-The workspace strip uses a document-centric layout with Home, Document, Markup, and Tool Chest tabs. The **Tool Chest** and **Pages/Bookmarks** docks share the left panel, with a compact markup toolbar above the document. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect includes a local AES-256 password-protected copy action, along with save/export. Text replacement is available from Tools → Edit existing text. It finds an exact phrase on the current page, redacts the old glyphs, and inserts a replacement at the same location; this is staged in the document edit session with undo/redo and save-on-demand. Font metrics and color are approximated, surrounding text does not reflow, and scanned pages need OCR first. PyMuPDF is AGPL-3.0-or-later or commercially licensed by Artifex; this private local build uses its AGPL package. Do not distribute without meeting its license obligations or obtaining an Artifex commercial license. Place text box opens a live editor directly over the page: drag to define the box, type while seeing the preview, resize it with the blue corner handle, then choose Place (or Ctrl+Enter). The formatted text is added to the page itself, so it remains visible and selectable after the preview closes. The top formatting toolbar controls point size, bold, italic, underline, letter spacing, line spacing, and left/center/right/justified alignment. Place writes the formatted text and visible blue outline into the PDF page content, so the text appears in the viewer and remains selectable and searchable. Placed text boxes can be selected and dragged to a new position before saving; this replays the edit journal so later edits are retained and undo remains available. Press Esc to switch to Select. Select also preserves ordinary PDF text selection. The active tool remains highlighted in the toolbar and in the persistent status indicator. Comment tools add visible markups for sticky notes, highlight, underline, strikethrough, freehand pen, lines, arrows, rectangles, and ellipses. To support Qt's PDF viewer, these marks include page-content appearances plus PDF annotation objects. OCR, signatures, Office conversion, and PDF/A/X checks remain unavailable.
+### Markups List
+A table of every markup in the document showing page, type, subject, comment, author, date, status, colour, and measurement. You can filter by text, type, or status, sort by any column, set the status (Accepted, Rejected, Completed, …), delete markups, and export the list to CSV. Clicking a row jumps to that markup. A totals line adds up measurements by subject (for example, total flooring area or the number of outlets counted).
 
-The selected workspace and dock layout are saved locally. Existing document tabs remain separate from the task workspace tabs. The current in-memory edit journal is needed to move text boxes; after closing and reopening a saved PDF, previously placed text is page content and cannot yet be reselected as a movable object.
+### Tool Chest
+- **Built-in sets:** Markup, Measure, Construction Review (revision and hold clouds, RFI callout, coloured highlighters, area takeoff, count tools), Stamps, and Redaction.
+- **Recent Tools** remembers each tool and property combination you use.
+- **Saving tools:** "Add to Tool Chest…" saves the selected markup's look as a reusable tool in **My Tools** or a new set of your own.
+- **Sharing:** sets can be exported and imported as JSON.
+
+### Measurement
+- **Scales are set per page.** Choose a standard scale (1/8" = 1'-0", 1/4" = 1'-0", 1" = 20', 1:100, …), enter a custom ratio, or use **Calibrate**: drag along a known dimension and type its real length (12'-6" style input is accepted). A scale can be applied to one page or every page.
+- **Tools:** Length, Polylength, Area, Perimeter, Count, and Angle.
+- **Updating and display:** values follow the page scale and recalculate when a measurement is moved or reshaped. Values display in feet-inches (to 1/16"), feet, inches, millimetres, centimetres, or metres. Length measurements show their value on the line in any PDF viewer; other measurements are labelled on the page in Northstar and store their value in the markup's comment.
+
+### Drawing review
+- **Compare Documents** finds visible differences between an older revision and the open drawing, and adds a cloud markup around each change.
+- **Overlay Pages** combines two revisions into a new view: red means only in the older revision, cyan means only in the newer one, and black means unchanged.
+- **Snapshot** copies any area of a page to the clipboard as an image.
+
+### Pages and documents
+- **Viewing:** tabs for several documents, continuous or single-page view, wheel zoom at the cursor, middle-drag or Space+drag panning, zoom to area, fit width or page, and sharp rendering at high zoom on large-format sheets.
+- **Page tools:** thumbnails with drag-to-reorder and multi-select; rotate, delete, insert blank pages, insert from another PDF, replace, extract, split, and merge. Crop pages by dragging the area to keep, with Reset Crop to undo it. Rotating, deleting, or reordering pages keeps bookmarks and form fields.
+- **Panels:** bookmarks (add, rename, delete), layers (show or hide optional content), and search across all pages with match case and whole word options.
+- **Forms and text:** fill form fields in a table (text, check boxes, and choices), replace existing text, and export the text.
+- **Final output:** true redaction (marked areas are permanently removed when applied), Flatten Markups, and password-protected AES-256 copies. Password-protected PDFs open with their password and stay encrypted when saved.
+- **Undo history:** undo and redo cover every edit, including page operations, and are still available after saving.
+
+The crop box hides content outside it but does not remove it. Use Redaction to delete content.
 
 ## Build and download
 
-Every push to `main` builds `NorthstarPDF.exe` on a clean Windows runner. In GitHub, open **Actions → Build Windows app → latest successful run → Artifacts → NorthstarPDF-Windows**. Extract the artifact ZIP and double-click `NorthstarPDF.exe`. It is a one-file build and does not require Python or Qt installed on your PC. The app itself does not check for updates or contact a service. GitHub Actions is used only to build and deliver the binary.
-
-The workflow can also be started manually from the Actions tab using **Run workflow**. Build artifacts are retained for 30 days. This repository does not commit executable binaries.
+Every push to `main` and every pull request builds `NorthstarPDF.exe` on a clean Windows runner, runs the unit tests and an automated UI self-test, then smoke-tests the packaged executable. In GitHub, open **Actions → Build Windows app → latest successful run → Artifacts → NorthstarPDF-Windows**, extract the ZIP, and double-click `NorthstarPDF.exe`. It is a one-file build and needs no Python or Qt install. The workflow can also be run manually with **Run workflow**. Artifacts are kept for 30 days.
 
 ## Local development
 
@@ -35,25 +56,43 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt pyinstaller pytest
 python src\main.py
+python -m pytest -q
+python src\main.py --self-test
 ```
 
 To make a local executable, run the `pyinstaller` command in `.github/workflows/windows-build.yml`.
 
+### Code layout
+
+| File | Purpose |
+| --- | --- |
+| `src/main.py` | Main window, menus, toolbars, and the `--self-test` used by CI |
+| `src/canvas.py` | Page rendering (PyMuPDF), zoom/pan, and mouse handling for every tool |
+| `src/pdf_document.py` | In-memory document with undo/redo (MuPDF journal plus document snapshots) and saving |
+| `src/markups.py` | Creating, styling, moving, reshaping, hit-testing, and listing markups; measurement and scales |
+| `src/panels.py` | Properties, Markups List, Tool Chest, Thumbnails, Bookmarks, Layers, Search |
+| `src/tool_chest.py` | Tool sets and their JSON storage |
+| `src/compare.py` | Overlay and difference detection |
+| `src/pdf_operations.py` | Page edits, exports, forms, text replacement, flattening, redaction |
+| `src/dialogs.py` | Scale, calibration, and form-filling dialogs |
+| `src/offline_guard.py` | Blocks network access from Python code |
+
 ## Offline behavior
 
-The program installs a Python audit hook before importing Qt. It rejects Python socket creation, URL requests, and HTTP client connections. A regression test verifies that socket creation fails. The app does not import Qt Network, WebEngine, update, sharing, or telemetry modules. This source-level/runtime Python guard cannot observe native sockets opened directly by a prebuilt binary; the packaged dependency set is intentionally limited to Qt Core/Gui/Widgets/Pdf/PdfWidgets.
+The program installs a Python audit hook before importing Qt. It rejects Python socket creation, URL requests, and HTTP client connections, and a regression test verifies this. The app does not import Qt Network, WebEngine, update, sharing, or telemetry modules. The guard cannot observe native sockets opened directly by a prebuilt library; the packaged dependency set is limited to Qt Core/Gui/Widgets and PyMuPDF.
 
 ## Libraries and licenses
 
-- **PySide6 / Qt PDF**: Qt modules are available under LGPLv3, GPLv3, and/or commercial terms depending on module and distribution. Qt PDF uses PDFium internally. Review the exact license notices shipped with the wheel and meet applicable dynamic-linking/replacement and attribution obligations before redistributing the executable. The build artifact bundles Qt libraries in a one-file PyInstaller package; confirm the LGPL compliance model for this distribution before commercial release.
-- **PDFium**: BSD-style license with additional bundled third-party notices. Qt's PDF module includes attribution and license data; release packaging must retain it.
-- **pypdf**: BSD-3-Clause; include the license notice when redistributing.
-- **cryptography**: Apache-2.0 or BSD-3-Clause; include applicable notices when redistributing.
-- **PyMuPDF**: AGPL-3.0-or-later or Artifex commercial license; distribution requires license compliance.
-- **PyInstaller**: GPL with a bootloader exception; include applicable notices.
+- **PyMuPDF / MuPDF** (rendering and all PDF editing): AGPL-3.0-or-later, or a commercial license from Artifex. Under the AGPL, anyone you give the program to must also be able to get its complete source code. Publishing this repository publicly meets that requirement for the app's own code.
+- **PySide6 / Qt**: LGPLv3 (or GPL/commercial). Keep the Qt license notices with distributed builds.
+- **PyInstaller**: GPL with a bootloader exception, which allows bundling the app.
 
-This application has not been legally reviewed. The build workflow includes library payloads in the executable, so do not sell or redistribute it until the Qt/PDFium/PyInstaller notice package and LGPL requirements have been verified for the exact versions.
+See `THIRD_PARTY_NOTICES.md`. This project has not been legally reviewed.
 
 ## Not implemented yet
 
-This is a growing local PDF editor, not a complete Acrobat replacement. Acrobat-quality text/image editing with font matching and reflow, advanced callouts, stamps, measuring tools, comment filtering/export, attachments/layers panels, regex and multi-file search, and full two-page spread are not implemented. Basic existing-text replacement is available in the Edit workspace, and the Comment workspace supports common text and shape annotations. The editing tools do not yet provide Acrobat's font reconstruction, paragraph reflow, or complete markup toolset. The current forms work is basic field filling; a form designer, calculations, robust XFDF/FDF/CSV interchange, and advanced form widgets are not implemented. Office/HTML conversion, scanning, batch action wizard, OCR, signatures/certificate validation, true redaction and sanitization, PDF/A or PDF/X validation, accessibility tagging, preflight, and print-production workflows are also not implemented. These require dedicated implementations and validation; this build does not present them as completed features.
+- **Document content:** OCR of scanned pages; digital signatures and certificate validation; Office and image conversion.
+- **Multi-file and collaboration:** batch processing across many files, Sets (multi-file drawing packages), and real-time collaboration (left out on purpose to keep the app offline).
+- **Measurement:** snapping to drawing content, volume measurements, and separate scales for viewports within a page.
+- **Text:** rich-text formatting (bold, italic, underline) in text boxes, and paragraph reflow when editing existing text.
+- **Standards:** PDF/A and PDF/X validation, and accessibility tagging.

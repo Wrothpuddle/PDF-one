@@ -1,5 +1,9 @@
 # Third-party software notices
 
-The Windows build includes PySide6/Qt 6 and Qt PDF (which uses PDFium), pypdf, PyMuPDF, plus PyInstaller. Exact license texts and third-party attributions must be collected from the installed package versions and included with any redistributed build.
+The Windows build bundles PySide6 / Qt 6, PyMuPDF (MuPDF), and the PyInstaller bootloader.
 
-Qt modules have per-module LGPLv3/GPLv3/commercial terms. Qt PDF's PDFium code is BSD-style, and PDFium's dependency tree contains additional notices. pypdf is BSD-3-Clause licensed. PyMuPDF is offered under AGPL-3.0-or-later or a commercial license from Artifex; this private local build uses the AGPL package for text editing. Do not distribute the app without meeting applicable AGPL obligations or obtaining a commercial license. Its optional cryptography backend is dual-licensed Apache-2.0 OR BSD-3-Clause. PyInstaller is GPL with a bootloader exception. See README.md for the distribution caveat. This starter does not yet ship a version-specific notice bundle; commercial distribution is blocked until that bundle and LGPL compliance are reviewed.
+- **PyMuPDF and MuPDF** are licensed under the GNU Affero General Public License v3.0 or later (or a commercial license from Artifex Software). Northstar PDF uses them for rendering and every PDF edit. Under the AGPL, the complete corresponding source code must be available to everyone who receives the program, including the source of this app.
+- **Qt 6 / PySide6** modules used here (Core, Gui, Widgets, Test) are available under LGPLv3, GPLv3, or commercial terms. Keep Qt's license texts with distributed builds, and let users replace the Qt libraries. The build's one-file PyInstaller package extracts Qt's DLLs to a temporary folder at run time.
+- **PyInstaller** is GPL-2.0 with a bootloader exception that allows bundling applications under other licenses.
+
+The exact license texts for each version ship inside the installed packages (`site-packages/*/LICENSE*` and the `*.dist-info` folders). Include them with any build you share.

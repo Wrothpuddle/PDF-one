@@ -1,976 +1,534 @@
-"""Northstar PDF: a local-only Windows PDF viewer built with Qt PDF/PDFium."""
+"""Northstar PDF: an offline PDF markup, measurement, and review app for Windows.
+
+The workflow follows Bluebeam Revu: live markups you can select and restyle,
+a Properties panel, a Markups List, a Tool Chest of saved tools, scaled
+measurements, and drawing compare/overlay. Everything runs locally.
+"""
 from __future__ import annotations
+
+import getpass
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Install the offline guard before loading any UI or PDF libraries.
 from offline_guard import install_offline_guard
 install_offline_guard()
 
-from pdf_operations import (add_pdf_annotation, add_rich_text_box, extract_pages,
-                            extract_text_file, merge_pdfs, read_form_fields,
-                            split_pdf, protect_pdf, replace_existing_text)
-from pypdf import PdfReader
-from edit_session import EditSession
+import pymupdf as fitz
+from PySide6.QtCore import QPointF, QSettings, QStandardPaths, Qt, QTimer
+from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QColor, QGuiApplication,
+                           QKeySequence, QPalette)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog,
+                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSpinBox,
+                               QStyleFactory, QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSettings, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QCloseEvent, QFont, QKeyEvent,
-                           QTextBlockFormat, QTextCharFormat, QTextCursor)
-from PySide6.QtPdf import QPdfDocument, QPdfBookmarkModel, QPdfSearchModel
-from PySide6.QtPdfWidgets import QPdfView
-from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
-    QLineEdit, QListView, QMainWindow, QMessageBox, QSpinBox, QTabWidget,
-    QToolBar, QTreeView, QWidget, QHBoxLayout, QVBoxLayout, QTabBar,
-    QToolButton, QScrollArea, QFrame, QRubberBand, QDoubleSpinBox,
-    QGridLayout, QTextEdit,
-)
+import compare
+import markups
+import pdf_operations as ops
+from canvas import PdfCanvas
+from dialogs import CalibrateDialog, FormDialog, ScaleDialog
+from markups import KIND_LABELS, MEASURE_KINDS, Style, default_style
+from panels import (BookmarksPanel, LayersPanel, MarkupsList, PropertiesPanel, SearchPanel,
+                    ThumbnailsPanel, ToolChestPanel, search_document)
+from pdf_document import PdfSession
+from tool_chest import MY_TOOLS, ToolChest, ToolPreset
 
 APP_NAME = "Northstar PDF"
+APP_VERSION = "0.2.0"
+LAYOUT_VERSION = 2
+
+MARKUP_TOOLS = ["text", "callout", "note", "highlight", "underline", "strikeout",
+                "pen", "highlighter", "line", "arrow", "polyline", "polygon", "cloud",
+                "rectangle", "ellipse", "stamp"]
+MEASURE_TOOLS = ["length", "polylength", "area", "perimeter", "count", "angle"]
+NAV_TOOLS = {"select": "Select", "pan": "Pan", "text_select": "Select Text",
+             "zoom_area": "Zoom Area", "crop": "Crop", "snapshot": "Snapshot",
+             "calibrate": "Calibrate", "redact": "Redact"}
+SHORTCUTS = {"select": "V", "pan": "H", "text_select": "Alt+T", "text": "T", "callout": "Q",
+             "note": "N", "highlight": "Alt+H", "pen": "P", "line": "L", "arrow": "A",
+             "polyline": "Alt+N", "polygon": "Shift+P", "cloud": "C", "rectangle": "R",
+             "ellipse": "E", "length": "Shift+Alt+L", "area": "Shift+Alt+A",
+             "count": "Shift+Alt+C"}
+# Tools that stay active after use (others return to Select unless locked).
+STAY_ACTIVE = {"count", "pen", "highlighter", "zoom_area"}
 
 
-class PlacementTextEdit(QTextEdit):
-    """Text editor with explicit Place-on-Enter and newline-on-Ctrl+Enter behavior."""
-
-    placeRequested = Signal()
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if event.modifiers() == Qt.KeyboardModifier.NoModifier:
-                self.placeRequested.emit()
-                event.accept()
-                return
-            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                self.textCursor().insertBlock()
-                event.accept()
-                return
-        super().keyPressEvent(event)
+def tool_label(kind: str) -> str:
+    return NAV_TOOLS.get(kind) or KIND_LABELS.get(kind, kind.title())
 
 
-class DragHandle(QLabel):
-    """Small grip that moves a live text box without interrupting typing."""
+class DocumentView(QWidget):
+    """One document tab: its session and canvas."""
 
-    def __init__(self, editor: "TextPlacementEditor") -> None:
-        super().__init__("⠿  Drag to move", editor)
-        self._origin = None
-        self._initial_pos = None
-        self.setFixedHeight(20)
-        self.setAccessibleName("Move text box")
-        self.setCursor(Qt.CursorShape.SizeAllCursor)
-        self.setStyleSheet("background:#eaf2fc;color:#245c9b;border:0;font-size:11px;padding-left:4px;")
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._origin = event.globalPosition().toPoint()
-            self._initial_pos = self.parentWidget().pos()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._origin is not None and self._initial_pos is not None:
-            delta = event.globalPosition().toPoint() - self._origin
-            editor = self.parentWidget()
-            bounds = editor.parentWidget().rect()
-            x = max(0, min(bounds.width() - editor.width(),
-                           self._initial_pos.x() + delta.x()))
-            y = max(0, min(bounds.height() - editor.height(),
-                           self._initial_pos.y() + delta.y()))
-            editor.move(x, y)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._origin = None
-        self._initial_pos = None
-        event.accept()
-
-
-class ResizeCorner(QLabel):
-    """Drag handle that lets users resize the live text box in the page view."""
-
-    def __init__(self, editor: "TextPlacementEditor") -> None:
-        super().__init__("◢", editor)
-        self._origin = None
-        self._initial_size = None
-        self.setFixedSize(18, 18)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        self.setStyleSheet("background:#2878d0;color:white;border:0;font-size:13px;")
-
-    def mousePressEvent(self, event) -> None:
-        self._origin = event.globalPosition().toPoint()
-        self._initial_size = self.parentWidget().size()
-        event.accept()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._origin is not None and self._initial_size is not None:
-            delta = event.globalPosition().toPoint() - self._origin
-            editor = self.parentWidget()
-            editor.resize(max(110, self._initial_size.width() + delta.x()),
-                          max(54, self._initial_size.height() + delta.y()))
-        event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._origin = None
-        self._initial_size = None
-        event.accept()
-
-
-class TextPlacementEditor(QFrame):
-    """In-document live text preview with a draggable resize corner."""
-
-    def __init__(self, parent: QWidget, geometry: QRect) -> None:
+    def __init__(self, session: PdfSession, parent=None) -> None:
         super().__init__(parent)
-        self.setObjectName("TextPlacementEditor")
-        self.setGeometry(geometry)
-        self.setMinimumSize(110, 54)
-        self.setFrameShape(QFrame.Shape.Box)
-        self.setLineWidth(2)
-        self.setStyleSheet(
-            "QFrame#TextPlacementEditor { background:#ffffff; border:2px solid #2878d0; }"
-            "QTextEdit { background:#ffffff; color:#111111; border:0; padding:2px; }"
-        )
-        self.move_handle = DragHandle(self)
-        self.text_edit = PlacementTextEdit(self)
-        self.text_edit.setAcceptRichText(False)
-        self.text_edit.setPlaceholderText("Type your text here…")
-        self.text_edit.setAccessibleName("Text to place in PDF")
-        layout = QGridLayout(self)
-        layout.setContentsMargins(5, 4, 5, 5)
-        layout.setSpacing(0)
-        layout.addWidget(self.move_handle, 0, 0)
-        layout.addWidget(self.text_edit, 1, 0)
-        self.resize_corner = ResizeCorner(self)
-        layout.addWidget(self.resize_corner, 1, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        self._add_shortcuts()
-
-    def _add_shortcuts(self) -> None:
-        self.cancel_action = QAction("Cancel text placement", self)
-        # Escape is handled by the main window so it works from the page,
-        # text editor, formatting bar, and tool panel.
-        self.commit_action = QAction("Place text", self)
-
-
-class InteractivePdfView(QPdfView):
-    """PDF view with selection, markup gestures, zoom, and middle-button panning."""
-
-    annotationGesture = Signal(object)
-    selectionGesture = Signal(object)
-    escapePressed = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.annotation_tool = "select"
-        self._pan_point = None
-        self._pan_h = 0
-        self._pan_v = 0
-        self._pan_page = 0
-        self._pan_location = QPointF()
-        self._pan_zoom = 1.0
-        self._draw_start = None
-        self._draw_points: list[tuple[float, float]] = []
-        self._draw_page = 0
-        self._draw_location = QPointF()
-        self._draw_zoom = 1.0
-        self._select_start = None
-        self._select_page = 0
-        self._select_location = QPointF()
-        self._select_zoom = 1.0
-        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
-        self._selection_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
-        self._selection_band.setStyleSheet(
-            "QRubberBand { border:2px solid #1683d8; background:transparent; }"
-        )
-
-    def set_annotation_tool(self, tool: str | None) -> None:
-        self.annotation_tool = tool or "select"
-        if self.annotation_tool == "select":
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            self._rubber_band.hide()
-        else:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-
-    def show_selected_object(self, rect: QRect | None) -> None:
-        if rect is None:
-            self._selection_band.hide()
-            return
-        self._selection_band.setGeometry(rect)
-        self._selection_band.show()
-        self._selection_band.raise_()
-
-    def wheelEvent(self, event) -> None:
-        """Use the wheel to zoom around the pointer; middle drag remains the pan gesture."""
-        delta = event.angleDelta().y()
-        nav = self.pageNavigator()
-        page = nav.currentPage()
-        if not delta or page < 0 or self.document() is None:
-            super().wheelEvent(event)
-            return
-        old_zoom = float(nav.currentZoom())
-        if old_zoom <= 0:
-            old_zoom = max(float(self.zoomFactor()), 0.1)
-        new_zoom = max(0.1, min(8.0, old_zoom * (1.18 ** (delta / 120.0))))
-        if abs(new_zoom - old_zoom) < 0.0001:
-            event.accept()
-            return
-        location = nav.currentLocation()
-        pointer = event.position()
-        new_location = QPointF(
-            location.x() + pointer.x() / old_zoom - pointer.x() / new_zoom,
-            location.y() + pointer.y() / old_zoom - pointer.y() / new_zoom,
-        )
-        self.setZoomMode(QPdfView.ZoomMode.Custom)
-        self.setZoomFactor(new_zoom)
-        nav.jump(page, new_location, new_zoom)
-        event.accept()
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._pan_point = event.position().toPoint()
-            self._pan_h = self.horizontalScrollBar().value()
-            self._pan_v = self.verticalScrollBar().value()
-            navigator = self.pageNavigator()
-            self._pan_page = max(0, navigator.currentPage())
-            self._pan_location = QPointF(navigator.currentLocation())
-            self._pan_zoom = max(float(navigator.currentZoom()), 0.1)
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
-            return
-        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool == "select":
-            point = event.position().toPoint()
-            nav = self.pageNavigator()
-            self._select_start = (float(point.x()), float(point.y()))
-            self._select_page = max(0, nav.currentPage())
-            self._select_location = QPointF(nav.currentLocation())
-            self._select_zoom = max(float(nav.currentZoom()), 0.1)
-            super().mousePressEvent(event)
-            return
-        if event.button() == Qt.MouseButton.LeftButton and self.annotation_tool != "select":
-            point = event.position().toPoint()
-            nav = self.pageNavigator()
-            self._draw_start = (float(point.x()), float(point.y()))
-            self._draw_points = [self._draw_start]
-            self._draw_page = max(0, nav.currentPage())
-            self._draw_location = QPointF(nav.currentLocation())
-            self._draw_zoom = max(float(nav.currentZoom()), 0.1)
-            self._rubber_band.setGeometry(point.x(), point.y(), 1, 1)
-            if self.annotation_tool not in ("note", "text"):
-                self._rubber_band.show()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        point = event.position().toPoint()
-        if self._pan_point is not None:
-            delta = point - self._pan_point
-            horizontal = self.horizontalScrollBar()
-            vertical = self.verticalScrollBar()
-            horizontal.setValue(self._pan_h - delta.x())
-            vertical.setValue(self._pan_v - delta.y())
-            pan_x = horizontal.value() == self._pan_h
-            pan_y = vertical.value() == self._pan_v
-            if pan_x or pan_y:
-                document = self.document()
-                page_size = document.pagePointSize(self._pan_page) if document else None
-                if page_size is not None:
-                    zoom = self._pan_zoom
-                    margin_x = max(0.0, (self.viewport().width()
-                                         - float(page_size.width()) * zoom) / (2.0 * zoom))
-                    margin_y = max(0.0, (self.viewport().height()
-                                         - float(page_size.height()) * zoom) / (2.0 * zoom))
-                    x = self._pan_location.x() - (delta.x() / zoom if pan_x else 0.0)
-                    y = self._pan_location.y() - (delta.y() / zoom if pan_y else 0.0)
-                    x = max(-margin_x, min(margin_x, x))
-                    y = max(-margin_y, min(margin_y, y))
-                    self.setZoomMode(QPdfView.ZoomMode.Custom)
-                    self.setZoomFactor(zoom)
-                    self.pageNavigator().jump(self._pan_page, QPointF(x, y), zoom)
-            event.accept()
-            return
-        if self._select_start is not None:
-            left, top = self._select_start
-            self._selection_band.setGeometry(
-                int(min(left, point.x())), int(min(top, point.y())),
-                max(1, int(abs(point.x() - left))), max(1, int(abs(point.y() - top))),
-            )
-            self._selection_band.show()
-            super().mouseMoveEvent(event)
-            return
-        if self._draw_start is not None:
-            raw = (float(point.x()), float(point.y()))
-            if self.annotation_tool == "pen":
-                previous = self._draw_points[-1]
-                if (raw[0] - previous[0]) ** 2 + (raw[1] - previous[1]) ** 2 >= 9:
-                    self._draw_points.append(raw)
-            left, top = self._draw_start
-            self._rubber_band.setGeometry(
-                int(min(left, raw[0])), int(min(top, raw[1])),
-                max(1, int(abs(raw[0] - left))), max(1, int(abs(raw[1] - top))),
-            )
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.MiddleButton and self._pan_point is not None:
-            self._pan_point = None
-            self.setCursor(Qt.CursorShape.ArrowCursor if self.annotation_tool == "select"
-                           else Qt.CursorShape.CrossCursor)
-            event.accept()
-            return
-        if event.button() == Qt.MouseButton.LeftButton and self._select_start is not None:
-            end = event.position().toPoint()
-            self.selectionGesture.emit({
-                "page": self._select_page,
-                "start": self._select_start,
-                "end": (float(end.x()), float(end.y())),
-                "location": QPointF(self._select_location),
-                "zoom": self._select_zoom,
-            })
-            self._select_start = None
-            super().mouseReleaseEvent(event)
-            return
-        if event.button() == Qt.MouseButton.LeftButton and self._draw_start is not None:
-            end = event.position().toPoint()
-            raw_end = (float(end.x()), float(end.y()))
-            if self.annotation_tool == "pen":
-                self._draw_points.append(raw_end)
-            self.annotationGesture.emit({
-                "kind": self.annotation_tool,
-                "page": self._draw_page,
-                "start": self._draw_start,
-                "end": raw_end,
-                "points": list(self._draw_points),
-                "location": QPointF(self._draw_location),
-                "zoom": self._draw_zoom,
-            })
-            self._rubber_band.hide()
-            self._draw_start = None
-            self._draw_points = []
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape:
-            self.escapePressed.emit()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-
-class PdfTab(QWidget):
-    def __init__(self, path: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.path = str(Path(path).resolve())
-        self.document = QPdfDocument(self)
-        self.bookmarks = QPdfBookmarkModel(self)
-        self.bookmarks.setDocument(self.document)
-        self.search = QPdfSearchModel(self)
-        self.search.setDocument(self.document)
-        self.view = InteractivePdfView(self)
-        self.view.setDocument(self.document)
-        self.view.setSearchModel(self.search)
-        self.view.setPageMode(QPdfView.PageMode.MultiPage)
-        self.view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        self.view.setPageSpacing(14)
-        self.error: str | None = None
-        self.password: str | None = None
-        self.document.passwordRequired.connect(self._request_password)
-        result = self.document.load(self.path)
-        if result != QPdfDocument.Error.None_:
-            self.error = f"Could not open PDF (error: {result})."
-        self.edit_session = EditSession(self.path)
+        self.session = session
+        self.canvas = PdfCanvas(session, self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.view)
+        layout.addWidget(self.canvas)
+        self.search_hits: list[tuple[int, fitz.Rect, str]] = []
 
     @property
-    def dirty(self) -> bool:
-        return self.edit_session.dirty
+    def title(self) -> str:
+        return self.session.path.name + (" *" if self.session.dirty else "")
 
-    def _reload_working_copy(self, page: int) -> None:
-        self.document.close()
-        result = self.document.load(str(self.edit_session.working_path))
-        if result != QPdfDocument.Error.None_:
-            raise RuntimeError(f"Could not reload edited PDF (error: {result}).")
-        QTimer.singleShot(0, lambda: self.view.pageNavigator().jump(
-            min(page, max(0, self.document.pageCount() - 1)), QPointF(0, 0)
-        ))
-
-    def rotate_current_page(self) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.rotate(page, password=self.password)
-        self._reload_working_copy(page)
-
-    def delete_current_page(self) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.delete_page(page, password=self.password)
-        self._reload_working_copy(min(page, self.document.pageCount() - 2))
-
-    def reorder_pages(self, order: list[int]) -> None:
-        self.edit_session.reorder(order, password=self.password)
-        self._reload_working_copy(0)
-
-    def crop_current_page(self, left: float, bottom: float, right: float, top: float) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.crop(page, left, bottom, right, top, password=self.password)
-        self._reload_working_copy(page)
-
-    def insert_pages(self, source: str, before_page: int) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.insert(source, before_page, password=self.password)
-        self._reload_working_copy(page)
-
-    def replace_current_page(self, source: str) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.replace(source, page, password=self.password)
-        self._reload_working_copy(page)
-
-    def fill_fields(self, values: dict[str, str]) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.fill_fields(values, password=self.password)
-        self._reload_working_copy(page)
-
-    def add_sticky_note(self, text: str) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.add_sticky_note(page, text, password=self.password)
-        self._reload_working_copy(page)
-
-    def undo_edit(self) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.undo()
-        self._reload_working_copy(page)
-
-    def redo_edit(self) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.redo()
-        self._reload_working_copy(page)
-
-    def save_edits(self) -> None:
-        if not self.dirty:
-            return
-        page = self.view.pageNavigator().currentPage()
-        self.document.close()
-        try:
-            self.edit_session.save()
-        except Exception:
-            self.document.load(str(self.edit_session.working_path))
-            raise
-        self._reload_working_copy(page)
-
-    def discard_edits(self) -> None:
-        page = self.view.pageNavigator().currentPage()
-        self.edit_session.discard()
-        self._reload_working_copy(page)
-
-    def cleanup(self) -> None:
-        self.document.close()
-        self.edit_session.cleanup()
-
-    def _request_password(self) -> None:
-        password, accepted = QInputDialog.getText(
-            self, "Password required", f"Enter the password for {Path(self.path).name}:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted:
-            self.error = "Password entry was cancelled."
-            return
-        self.password = password
-        self.document.setPassword(password)
-        QTimer.singleShot(0, lambda: self.document.load(self.path))
 
 class MainWindow(QMainWindow):
     def __init__(self, files: list[str] | None = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1320, 860)
-        self.settings = QSettings("Northstar", "NorthstarPDF")
-        self.tool_actions: dict[str, QAction] = {}
-        self._text_editor: TextPlacementEditor | None = None
-        self._text_active_tab: PdfTab | None = None
-        self._text_context: dict | None = None
-        self._selected_text_box: tuple[PdfTab, int, int, tuple] | None = None
+        self.resize(1440, 900)
+        # Organization/application names are set on the QApplication, so the
+        # self-test can redirect settings to a temporary folder.
+        self.settings = QSettings()
+        data_dir = Path(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation) or tempfile.gettempdir())
+        self.chest = ToolChest(data_dir / "tool_chest.json")
+        self.user_name = str(self.settings.value("userName", "") or getpass.getuser())
+        self.tool = "select"
+        self.tool_locked = False
+        self.tool_styles: dict[str, Style] = {}
+        self.clipboard: tuple[PdfSession, list[tuple[int, int]]] | None = None
+        self._temp_files: list[Path] = []
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(250)
+        self._refresh_timer.timeout.connect(self._refresh_panels)
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setSingleShot(True)
+        self._thumb_timer.setInterval(900)
+        self._thumb_timer.timeout.connect(self._refresh_thumbnails)
+
         self.tabs = QTabWidget(self)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
-        self.setCentralWidget(self.tabs)
-        self._make_navigation_dock()
-        self._make_search_dock()
-        self._make_toolbar()
-        self._make_tool_dock()
-        self._make_menus()
-        self._make_markup_toolbar()
-        self.escape_action = QAction("Return to cursor", self)
-        self.escape_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
-        self.escape_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-        self.escape_action.triggered.connect(self._escape_to_pointer)
-        self.addAction(self.escape_action)
-        self._make_workspace_tabs()
-        self.active_tool_indicator = QLabel("TOOL  SELECT", self)
-        self.active_tool_indicator.setAccessibleName("Current tool")
-        self.active_tool_indicator.setStyleSheet(
-            "QLabel { background:#e8f1f9; color:#123b5d; border:1px solid #9db6c9;"
-            " border-radius:3px; padding:4px 9px; font-weight:700; }"
-        )
-        self.statusBar().addPermanentWidget(self.active_tool_indicator)
-        self._update_tool_indicator("select")
-        self.tabs.currentChanged.connect(self._refresh_active_document)
+        self.tabs.setDocumentMode(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
-        self.statusBar().showMessage("Ready · offline · scroll to zoom · middle-drag to pan")
-        saved_geometry = self.settings.value("windowGeometry")
-        saved_state = self.settings.value("windowState")
-        if saved_geometry:
-            self.restoreGeometry(saved_geometry)
-        if saved_state:
-            self.restoreState(saved_state)
-        workspace = self.settings.value("workspace", "Read")
-        workspace_index = next(
-            (i for i in range(self.workspace_tabs.count())
-             if self.workspace_tabs.tabText(i) == workspace), 0
-        )
-        self.workspace_tabs.setCurrentIndex(workspace_index)
+        self.setCentralWidget(self.tabs)
+        self.start_page = self._make_start_page()
+        self.tabs.addTab(self.start_page, "Start")
+
+        self._make_docks()
+        self._make_actions()
+        self._make_menus()
+        self._make_toolbars()
+        self._make_status_bar()
+        self.tabs.currentChanged.connect(self._tab_changed)
+        geometry = self.settings.value("windowGeometry")
+        state = self.settings.value("windowState")
+        if geometry:
+            self.restoreGeometry(geometry)
+        # Panel layouts saved by older versions do not match the current docks.
+        if state and self.settings.value("layoutVersion", 0, type=int) == LAYOUT_VERSION:
+            self.restoreState(state)
+        QTimer.singleShot(0, self.thumb_dock.raise_)
+        QTimer.singleShot(0, self.props_dock.raise_)
+        if self.settings.value("darkTheme", False, type=bool):
+            self.dark_action.setChecked(True)
+        self.set_tool("select")
         for path in files or []:
             self.open_file(path)
-        if self.tabs.count() == 0:
-            self._show_start_page()
+        self._update_actions()
 
-    def _make_navigation_dock(self) -> None:
-        self.navigation = QTabWidget(self)
-        self.page_list = QListView(self.navigation)
-        self.bookmark_tree = QTreeView(self.navigation)
-        self.navigation.addTab(self.page_list, "Pages")
-        self.navigation.addTab(self.bookmark_tree, "Bookmarks")
-        self.nav_dock = QDockWidget("Navigation", self)
-        self.nav_dock.setObjectName("NavigationDock")
-        self.nav_dock.setWidget(self.navigation)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.nav_dock)
-        self.page_list.clicked.connect(self._jump_to_page_index)
-        self.bookmark_tree.clicked.connect(self._jump_to_bookmark)
-
-    def _make_search_dock(self) -> None:
-        self.search_results = QListView(self)
-        self.search_dock = QDockWidget("Search results", self)
-        self.search_dock.setObjectName("SearchDock")
-        self.search_dock.setWidget(self.search_results)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.search_dock)
-        self.search_results.clicked.connect(self._jump_to_search_result)
-
-    def _make_toolbar(self) -> None:
-        toolbar = QToolBar("Document controls", self)
-        toolbar.setObjectName("DocumentControlsToolbar")
-        toolbar.setMovable(True)
-        self.addToolBar(toolbar)
-        open_action = QAction("Open", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_dialog)
-        toolbar.addAction(open_action)
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("Page "))
-        self.page_number = QSpinBox(self)
-        self.page_number.setMinimum(1)
-        self.page_number.setMaximum(1)
-        self.page_number.setFixedWidth(72)
-        self.page_number.valueChanged.connect(self._jump_to_page_number)
-        toolbar.addWidget(self.page_number)
-        self.page_total = QLabel("of 0", self)
-        toolbar.addWidget(self.page_total)
-        toolbar.addSeparator()
-        self.mode = QComboBox(self)
-        self.mode.addItem("Continuous", QPdfView.PageMode.MultiPage)
-        self.mode.addItem("Single page", QPdfView.PageMode.SinglePage)
-        self.mode.currentIndexChanged.connect(self._change_page_mode)
-        toolbar.addWidget(self.mode)
-        self.zoom = QComboBox(self)
-        self.zoom.addItem("Fit width", QPdfView.ZoomMode.FitToWidth)
-        self.zoom.addItem("Fit page", QPdfView.ZoomMode.FitInView)
-        self.zoom.addItem("100%", QPdfView.ZoomMode.Custom)
-        self.zoom.currentIndexChanged.connect(self._change_zoom)
-        toolbar.addWidget(self.zoom)
-        toolbar.addSeparator()
-        self.search_box = QLineEdit(self)
-        self.search_box.setPlaceholderText("Find text in this PDF")
-        self.search_box.setMaximumWidth(250)
-        self.search_box.returnPressed.connect(self._start_search)
-        toolbar.addWidget(self.search_box)
-        find_action = QAction("Find", self)
-        self.find_action = find_action
-        find_action.setShortcut(QKeySequence.StandardKey.Find)
-        find_action.triggered.connect(self._start_search)
-        toolbar.addAction(find_action)
-        self.previous_result = QAction("Previous", self)
-        self.previous_result.triggered.connect(lambda: self._step_search(-1))
-        toolbar.addAction(self.previous_result)
-        self.next_result = QAction("Next", self)
-        self.next_result.triggered.connect(lambda: self._step_search(1))
-        toolbar.addAction(self.next_result)
-
-        # Keep formatting controls visible so text can be styled while it is placed.
-        self.text_toolbar = QToolBar("Text formatting", self)
-        self.text_toolbar.setObjectName("TextFormattingToolbar")
-        self.text_toolbar.setMovable(True)
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.text_toolbar)
-        self.text_toolbar.addWidget(QLabel("Size", self.text_toolbar))
-        self.text_size = QSpinBox(self.text_toolbar)
-        self.text_size.setRange(4, 144)
-        self.text_size.setValue(12)
-        self.text_size.setSuffix(" pt")
-        self.text_size.setToolTip("Text size in points")
-        self.text_toolbar.addWidget(self.text_size)
-        self.text_bold = QToolButton(self.text_toolbar)
-        self.text_bold.setText("B")
-        self.text_bold.setToolTip("Bold")
-        self.text_bold.setCheckable(True)
-        self.text_bold.setStyleSheet("font-weight:700")
-        self.text_toolbar.addWidget(self.text_bold)
-        self.text_italic = QToolButton(self.text_toolbar)
-        self.text_italic.setText("I")
-        self.text_italic.setToolTip("Italic")
-        self.text_italic.setCheckable(True)
-        self.text_italic.setStyleSheet("font-style:italic")
-        self.text_toolbar.addWidget(self.text_italic)
-        self.text_underline = QToolButton(self.text_toolbar)
-        self.text_underline.setText("U")
-        self.text_underline.setToolTip("Underline")
-        self.text_underline.setCheckable(True)
-        self.text_underline.setStyleSheet("text-decoration:underline")
-        self.text_toolbar.addWidget(self.text_underline)
-        self.text_toolbar.addSeparator()
-        self.text_toolbar.addWidget(QLabel("Letter spacing", self.text_toolbar))
-        self.text_letter_spacing = QDoubleSpinBox(self.text_toolbar)
-        self.text_letter_spacing.setRange(0, 20)
-        self.text_letter_spacing.setDecimals(1)
-        self.text_letter_spacing.setSingleStep(0.5)
-        self.text_letter_spacing.setSuffix(" pt")
-        self.text_letter_spacing.setToolTip("Spacing between characters")
-        self.text_toolbar.addWidget(self.text_letter_spacing)
-        self.text_toolbar.addWidget(QLabel("Line spacing", self.text_toolbar))
-        self.text_line_spacing = QDoubleSpinBox(self.text_toolbar)
-        self.text_line_spacing.setRange(0.5, 4)
-        self.text_line_spacing.setDecimals(1)
-        self.text_line_spacing.setSingleStep(0.1)
-        self.text_line_spacing.setValue(1.0)
-        self.text_line_spacing.setSuffix("×")
-        self.text_line_spacing.setToolTip("Line spacing multiplier")
-        self.text_toolbar.addWidget(self.text_line_spacing)
-        self.text_toolbar.addSeparator()
-        self.text_alignment = QComboBox(self.text_toolbar)
-        self.text_alignment.addItem("Left", "left")
-        self.text_alignment.addItem("Centered", "center")
-        self.text_alignment.addItem("Right", "right")
-        self.text_alignment.addItem("Justified", "justify")
-        self.text_alignment.setToolTip("Paragraph alignment")
-        self.text_toolbar.addWidget(self.text_alignment)
-        self.text_toolbar.addSeparator()
-        self.place_text_action = QAction("Place", self)
-        self.place_text_action.triggered.connect(self._commit_text_box)
-        self.text_toolbar.addAction(self.place_text_action)
-        self.cancel_text_action = QAction("Cancel", self)
-        self.cancel_text_action.triggered.connect(self._cancel_text_box)
-        self.text_toolbar.addAction(self.cancel_text_action)
-        for control in (self.text_size, self.text_bold, self.text_italic,
-                        self.text_underline, self.text_letter_spacing,
-                        self.text_line_spacing, self.text_alignment):
-            if isinstance(control, QSpinBox) or isinstance(control, QDoubleSpinBox):
-                control.valueChanged.connect(self._apply_text_style)
-            elif isinstance(control, QToolButton):
-                control.toggled.connect(self._apply_text_style)
-            else:
-                control.currentIndexChanged.connect(self._apply_text_style)
-        self.text_toolbar.setEnabled(False)
-
-    def _make_menus(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        open_action = file_menu.addAction("&Open…")
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_dialog)
-        save_action = file_menu.addAction("&Save")
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self._save_active)
-        self.recent_menu = file_menu.addMenu("Open &Recent")
-        self._refresh_recent_menu()
-        file_menu.addSeparator()
-        exit_action = file_menu.addAction("E&xit")
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        exit_action.triggered.connect(QApplication.quit)
-        edit_menu = self.menuBar().addMenu("&Edit")
-        self.undo_action = edit_menu.addAction("&Undo")
-        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        self.undo_action.triggered.connect(self._undo_active)
-        self.redo_action = edit_menu.addAction("&Redo")
-        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
-        self.redo_action.triggered.connect(self._redo_active)
-        page_menu = self.menuBar().addMenu("&Pages")
-        rotate_action = page_menu.addAction("Rotate current page clockwise")
-        rotate_action.triggered.connect(self._rotate_current_page)
-        delete_action = page_menu.addAction("Delete current page…")
-        delete_action.triggered.connect(self._delete_current_page)
-        note_action = page_menu.addAction("Add sticky note…")
-        note_action.triggered.connect(self._add_sticky_note)
-        extract_action = page_menu.addAction("Extract current page…")
-        extract_action.triggered.connect(self._extract_current_page)
-        reorder_action = page_menu.addAction("Reorder pages…")
-        reorder_action.triggered.connect(self._reorder_pages)
-        crop_action = page_menu.addAction("Crop current page…")
-        crop_action.triggered.connect(self._crop_current_page)
-        insert_action = page_menu.addAction("Insert pages from PDF…")
-        insert_action.triggered.connect(self._insert_pages)
-        replace_action = page_menu.addAction("Replace current page…")
-        replace_action.triggered.connect(self._replace_current_page)
-        split_action = page_menu.addAction("Split into one-page PDFs…")
-        split_action.triggered.connect(self._split_pdf)
-        merge_action = page_menu.addAction("Merge PDFs…")
-        merge_action.triggered.connect(self._merge_documents)
-        tools_menu = self.menuBar().addMenu("&Tools")
-        fill_action = tools_menu.addAction("Fill form fields…")
-        fill_action.triggered.connect(self._fill_form_fields)
-        replace_text_action = tools_menu.addAction("Edit existing text…")
-        replace_text_action.triggered.connect(self._edit_existing_text)
-        export_text_action = tools_menu.addAction("Export text…")
-        export_text_action.triggered.connect(self._export_text)
-        comment_menu = self.menuBar().addMenu("&Comment")
-        self.annotation_action_group = QActionGroup(self)
-        self.annotation_action_group.setExclusive(True)
-        annotation_actions = {}
-        select_action = comment_menu.addAction("Select tool")
-        select_action.setCheckable(True)
-        select_action.setChecked(True)
-        select_action.triggered.connect(lambda: self._activate_annotation_tool("select"))
-        self.annotation_action_group.addAction(select_action)
-        annotation_actions["Select"] = select_action
-        self.annotation_actions_by_kind = {"select": select_action}
-        for label, kind in (
-            ("Place text box", "text"), ("Place note", "note"),
-            ("Highlight region", "highlight"), ("Underline region", "underline"),
-            ("Strikethrough region", "strikeout"), ("Freehand pen", "pen"),
-            ("Line", "line"), ("Arrow", "arrow"),
-            ("Rectangle", "rectangle"), ("Ellipse", "ellipse"),
-        ):
-            action = comment_menu.addAction(label)
-            action.setCheckable(True)
-            self.annotation_action_group.addAction(action)
-            self.annotation_actions_by_kind[kind] = action
-            action.triggered.connect(
-                lambda checked=False, selected=kind: self._activate_annotation_tool(selected)
-            )
-            annotation_actions[label] = action
-        protect_action = tools_menu.addAction("Password-protect a copy…")
-        protect_action.triggered.connect(self._protect_copy)
-        view_menu = self.menuBar().addMenu("&View")
-        fullscreen = view_menu.addAction("Full screen")
-        fullscreen.setShortcut(QKeySequence("F11"))
-        fullscreen.triggered.connect(self._toggle_full_screen)
-        dark = view_menu.addAction("Dark theme")
-        dark.setCheckable(True)
-        dark.setChecked(bool(self.settings.value("darkTheme", False, type=bool)))
-        dark.toggled.connect(self._set_dark_theme)
-        view_menu.addAction(self.tool_dock.toggleViewAction())
-        view_menu.addAction(self.nav_dock.toggleViewAction())
-        view_menu.addAction(self.search_dock.toggleViewAction())
-        if dark.isChecked():
-            self._set_dark_theme(True)
-
-        # Shared action registry feeds the floating task tools panel. Each button
-        # invokes the same QAction as its menu/toolbar counterpart.
-        self.annotation_actions = annotation_actions
-        self.tool_actions = {
-            "Open": open_action, "Save": save_action,
-            "Select": select_action,
-            "Undo": self.undo_action, "Redo": self.redo_action,
-            "Rotate page": rotate_action, "Delete page": delete_action,
-            "Sticky note": note_action, "Extract page": extract_action,
-            "Reorder pages": reorder_action, "Crop page": crop_action,
-            "Insert pages": insert_action, "Replace page": replace_action,
-            "Split PDF": split_action, "Merge PDFs": merge_action,
-            "Fill form": fill_action, "Edit existing text": replace_text_action,
-            "Export text": export_text_action,
-            "Protect copy": protect_action,
-            **annotation_actions,
-            "Find text": self.find_action, "Previous match": self.previous_result,
-            "Next match": self.next_result, "Full screen": fullscreen,
-        }
-        dark_action = dark
-        self.tool_actions["Dark theme"] = dark_action
-
-    def _make_workspace_tabs(self) -> None:
-        """Task presets inspired by familiar Acrobat workspaces, with original UI."""
-        bar = QToolBar("Workspaces", self)
-        bar.setObjectName("WorkspaceTabsToolbar")
-        bar.setMovable(False)
-        bar.setStyleSheet(
-            "QToolBar#WorkspaceTabsToolbar { background:#dfe8ef; border-bottom:1px solid #aab9c4; }"
-            "QTabBar::tab { padding:8px 18px; color:#263744; }"
-            "QTabBar::tab:selected { background:white; color:#1264a3; border-bottom:3px solid #1683d8; }"
-        )
-        self.workspace_tabs = QTabBar(bar)
-        self.workspace_tabs.setObjectName("WorkspaceTabs")
-        self.workspace_tabs.setShape(QTabBar.Shape.RoundedNorth)
-        self.workspace_tabs.setExpanding(False)
-        self.workspace_tabs.setDrawBase(False)
-        for name in ("Home", "Document", "Markup", "Tool Chest"):
-            self.workspace_tabs.addTab(name)
-        self.workspace_tabs.currentChanged.connect(self._set_workspace)
-        bar.addWidget(self.workspace_tabs)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
-        self._set_workspace(0)
-
-    def _make_tool_dock(self) -> None:
-        """Build a movable/floating tool palette whose contents follow the workspace."""
-        self.tool_dock = QDockWidget("Tools · Read", self)
-        self.tool_dock.setObjectName("TaskToolsDock")
-        self.tool_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
-        self.tool_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-            | QDockWidget.DockWidgetFeature.DockWidgetClosable
-        )
-        self.tool_scroll = QScrollArea(self.tool_dock)
-        self.tool_scroll.setWidgetResizable(True)
-        self.tool_content = QWidget(self.tool_scroll)
-        self.tool_layout = QVBoxLayout(self.tool_content)
-        self.tool_layout.setContentsMargins(10, 12, 10, 12)
-        self.tool_layout.setSpacing(7)
-        self.tool_scroll.setWidget(self.tool_content)
-        self.tool_dock.setWidget(self.tool_scroll)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.tool_dock)
-        self.tabifyDockWidget(self.nav_dock, self.tool_dock)
-        self.nav_dock.raise_()
-
-    def _make_markup_toolbar(self) -> None:
-        """Provide the compact, persistent markup toolbar used by the Markup workspace."""
-        toolbar = QToolBar("Markup tools", self)
-        toolbar.setObjectName("MarkupToolbar")
-        toolbar.setMovable(True)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        toolbar.setStyleSheet(
-            "QToolBar#MarkupToolbar { background:#edf2f6; border:1px solid #bac7d1; }"
-            "QToolButton { padding:5px 8px; min-width:52px; }"
-            "QToolButton:checked { background:#cfe6f8; border:1px solid #2782bd; }"
-        )
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-        toolbar.addAction(self.tool_actions["Select"])
-        toolbar.addSeparator()
-        for label in ("Place text box", "Place note", "Highlight region",
-                      "Underline region", "Strikethrough region", "Freehand pen",
-                      "Line", "Arrow", "Rectangle", "Ellipse"):
-            toolbar.addAction(self.tool_actions[label])
-
-    def _set_workspace(self, index: int) -> None:
-        if not hasattr(self, "workspace_tabs"):
-            return
-        name = self.workspace_tabs.tabText(index)
-        presets = {
-            "Home": ("Open", "Save", "Undo", "Redo"),
-            "Document": ("Find text", "Previous match", "Next match", "Rotate page",
-                         "Reorder pages", "Insert pages", "Replace page", "Extract page",
-                         "Delete page", "Crop page", "Split PDF", "Merge PDFs"),
-            "Markup": ("Select", "Place text box", "Place note", "Highlight region",
-                       "Underline region", "Strikethrough region", "Freehand pen",
-                       "Line", "Arrow", "Rectangle", "Ellipse", "Undo", "Redo"),
-            "Tool Chest": ("Select", "Place text box", "Place note", "Highlight region",
-                           "Underline region", "Strikethrough region", "Freehand pen",
-                           "Line", "Arrow", "Rectangle", "Ellipse"),
-        }
-        self.tool_dock.setWindowTitle(f"Tool Chest · {name}")
-        while self.tool_layout.count():
-            item = self.tool_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        heading = QLabel(f"{name} tools", self.tool_content)
-        heading.setStyleSheet("font-size:16px;font-weight:600;padding:4px 2px 8px 2px;")
-        heading.setAccessibleName(f"{name} workspace tools")
-        self.tool_layout.addWidget(heading)
-        for label in presets.get(name, ()):
-            action = self.tool_actions.get(label)
-            if action is None:
-                continue
-            button = QToolButton(self.tool_content)
-            button.setText(label)
-            button.setDefaultAction(action)
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setMinimumHeight(34)
-            button.setSizePolicy(button.sizePolicy().horizontalPolicy(),
-                                 button.sizePolicy().verticalPolicy())
-            button.setAccessibleName(label)
-            button.setToolTip(action.toolTip() or action.text().replace("&", ""))
-            self.tool_layout.addWidget(button)
-        divider = QFrame(self.tool_content)
-        divider.setFrameShape(QFrame.Shape.HLine)
-        self.tool_layout.addWidget(divider)
-        note = QLabel(
-            "More Acrobat-class tools are planned. Features not yet implemented are not shown as working controls.",
-            self.tool_content,
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#777;padding:4px;")
-        self.tool_layout.addWidget(note)
-        self.tool_layout.addStretch(1)
-        if name in ("Document", "Markup", "Tool Chest"):
-            self.nav_dock.show()
-        if name == "Document":
-            self.search_dock.show()
-        else:
-            self.search_dock.hide()
-        self.settings.setValue("workspace", name)
-        self.tool_dock.show()
-        self.tool_dock.raise_()
-
-    def _show_start_page(self) -> None:
+    # -- construction ---------------------------------------------------------
+    def _make_start_page(self) -> QWidget:
         page = QWidget(self)
         layout = QVBoxLayout(page)
-        heading = QLabel("Northstar PDF", page)
-        heading.setStyleSheet("font-size: 26px; font-weight: 600; padding: 18px;")
-        hint = QLabel("Open a PDF to view, search, and navigate it. Files stay on this computer.", page)
-        hint.setStyleSheet("font-size: 14px; padding: 0 20px 20px 20px;")
+        heading = QLabel(APP_NAME, page)
+        heading.setStyleSheet("font-size:28px; font-weight:600; padding:24px 24px 6px 24px;")
+        hint = QLabel(
+            "Open a PDF (Ctrl+O) or drop one here to mark up, measure, and compare drawings.\n"
+            "Files never leave this computer.", page)
+        hint.setStyleSheet("font-size:14px; padding:0 24px 18px 24px;")
         layout.addWidget(heading)
         layout.addWidget(hint)
         layout.addStretch(1)
-        self.tabs.addTab(page, "Home")
+        self.setAcceptDrops(True)
+        return page
+
+    def _dock(self, title: str, name: str, widget: QWidget, area) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setObjectName(name)
+        dock.setWidget(widget)
+        self.addDockWidget(area, dock)
+        return dock
+
+    def _make_docks(self) -> None:
+        left, right = Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea
+        self.thumbnails = ThumbnailsPanel()
+        self.bookmarks = BookmarksPanel()
+        self.layers = LayersPanel()
+        self.properties = PropertiesPanel()
+        self.tool_chest = ToolChestPanel(self.chest)
+        self.search = SearchPanel()
+        self.markups_list = MarkupsList()
+        self.thumb_dock = self._dock("Thumbnails", "ThumbnailsDock", self.thumbnails, left)
+        self.bookmark_dock = self._dock("Bookmarks", "BookmarksDock", self.bookmarks, left)
+        self.layer_dock = self._dock("Layers", "LayersDock", self.layers, left)
+        self.tabifyDockWidget(self.thumb_dock, self.bookmark_dock)
+        self.tabifyDockWidget(self.bookmark_dock, self.layer_dock)
+        self.thumb_dock.raise_()
+        self.props_dock = self._dock("Properties", "PropertiesDock", self.properties, right)
+        self.chest_dock = self._dock("Tool Chest", "ToolChestDock", self.tool_chest, right)
+        self.search_dock = self._dock("Search", "SearchDock", self.search, right)
+        self.tabifyDockWidget(self.props_dock, self.chest_dock)
+        self.tabifyDockWidget(self.chest_dock, self.search_dock)
+        self.props_dock.raise_()
+        self.markups_dock = self._dock("Markups List", "MarkupsListDock", self.markups_list,
+                                       Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.resizeDocks([self.markups_dock], [210], Qt.Orientation.Vertical)
+        self.resizeDocks([self.thumb_dock, self.props_dock], [210, 290], Qt.Orientation.Horizontal)
+
+        self.thumbnails.pageActivated.connect(lambda page: self._canvas_call("go_to_page", page))
+        self.thumbnails.reorderRequested.connect(self._reorder_from_thumbnails)
+        self.thumbnails.contextRequested.connect(self._thumbnail_menu)
+        self.bookmarks.pageActivated.connect(lambda page: self._canvas_call("go_to_page", page))
+        self.bookmarks.tocEdited.connect(self._set_toc)
+        self.layers.toggled.connect(self._toggle_layer)
+        self.properties.styleEdited.connect(self._style_edited)
+        self.properties.commentEdited.connect(self._comment_edited)
+        self.properties.statusEdited.connect(
+            lambda status: self._set_status(self._selection(), status))
+        self.properties.saveToolRequested.connect(self._save_tool)
+        self.tool_chest.toolChosen.connect(self._tool_preset_chosen)
+        self.tool_chest.new_set.clicked.connect(self._new_tool_set)
+        self.tool_chest.import_button.clicked.connect(self._import_tools)
+        self.tool_chest.export_button.clicked.connect(self._export_tools)
+        self.search.searchRequested.connect(self._search)
+        self.search.resultActivated.connect(self._search_result)
+        self.markups_list.activated.connect(self._go_to_markup)
+        self.markups_list.selectionChanged.connect(self._list_selection)
+        self.markups_list.statusRequested.connect(self._set_status)
+        self.markups_list.deleteRequested.connect(self._delete_markups)
+        self.markups_list.exportRequested.connect(self._export_markups)
+
+    def _action(self, text: str, slot=None, shortcut=None, checkable: bool = False,
+                tip: str = "") -> QAction:
+        action = QAction(text, self)
+        if slot is not None:
+            action.triggered.connect(slot)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        action.setCheckable(checkable)
+        if tip:
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
+        return action
+
+    def _make_actions(self) -> None:
+        a = self._action
+        self.open_action = a("&Open…", self.open_dialog, QKeySequence.StandardKey.Open)
+        self.save_action = a("&Save", self.save, QKeySequence.StandardKey.Save)
+        self.save_as_action = a("Save &As…", self.save_as, QKeySequence.StandardKey.SaveAs)
+        self.close_action = a("&Close", lambda: self._close_tab(self.tabs.currentIndex()),
+                              QKeySequence.StandardKey.Close)
+        self.undo_action = a("&Undo", self.undo, QKeySequence.StandardKey.Undo)
+        self.redo_action = a("&Redo", self.redo, QKeySequence.StandardKey.Redo)
+        self.copy_action = a("&Copy", self.copy, QKeySequence.StandardKey.Copy)
+        self.paste_action = a("&Paste", self.paste, QKeySequence.StandardKey.Paste)
+        self.delete_action = a("&Delete", lambda: self._delete_markups(self._selection()),
+                               QKeySequence.StandardKey.Delete)
+        self.duplicate_action = a("D&uplicate", self.duplicate, "Ctrl+D")
+        self.select_all_action = a("Select &All Markups on Page", self.select_all_on_page,
+                                   QKeySequence.StandardKey.SelectAll)
+        self.edit_text_action = a("Edit Te&xt…", self._edit_selected_text, "F2")
+        self.fit_width_action = a("Fit &Width", lambda: self._canvas_call("fit", "width"), "Ctrl+2")
+        self.fit_page_action = a("Fit &Page", lambda: self._canvas_call("fit", "page"), "Ctrl+0")
+        self.actual_size_action = a("&Actual Size", lambda: self._set_zoom(1.0), "Ctrl+1")
+        self.zoom_in_action = a("Zoom &In", lambda: self._canvas_call("zoom_by", 1.25),
+                                QKeySequence.StandardKey.ZoomIn)
+        self.zoom_out_action = a("Zoom &Out", lambda: self._canvas_call("zoom_by", 0.8),
+                                 QKeySequence.StandardKey.ZoomOut)
+        self.single_page_action = a("&Single Page", self._toggle_single_page, checkable=True)
+        self.prev_page_action = a("Previous Page", lambda: self._step_page(-1), "PgUp")
+        self.next_page_action = a("Next Page", lambda: self._step_page(1), "PgDown")
+        self.full_screen_action = a("&Full Screen", self._toggle_full_screen, "F11")
+        self.dark_action = a("&Dark Theme", None, checkable=True)
+        self.dark_action.toggled.connect(self._set_dark_theme)
+        self.lock_action = a("Tool &Lock", None, "Ctrl+L", checkable=True,
+                             tip="Keep the current markup tool active after each use")
+        self.lock_action.toggled.connect(lambda on: setattr(self, "tool_locked", on))
+        self.ortho_action = a("&Ortho (snap lines to 45°)", None, "F8", checkable=True)
+        self.ortho_action.toggled.connect(self._set_ortho)
+        self.find_action = a("&Find…", self._focus_search, QKeySequence.StandardKey.Find)
+        self.find_next_action = a("Find &Next", lambda: self._step_search(1), "F3")
+        self.find_prev_action = a("Find Pre&vious", lambda: self._step_search(-1), "Shift+F3")
+
+        self.tool_group = QActionGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_actions: dict[str, QAction] = {}
+        for kind in list(NAV_TOOLS) + MARKUP_TOOLS + MEASURE_TOOLS:
+            if kind in self.tool_actions:
+                continue
+            action = a(tool_label(kind), lambda checked=False, k=kind: self.set_tool(k),
+                       SHORTCUTS.get(kind), checkable=True)
+            self.tool_group.addAction(action)
+            self.tool_actions[kind] = action
+        self.document_actions = [
+            self.save_action, self.save_as_action, self.close_action, self.select_all_action,
+            self.fit_width_action, self.fit_page_action, self.actual_size_action,
+            self.zoom_in_action, self.zoom_out_action, self.single_page_action,
+            self.prev_page_action, self.next_page_action, self.find_action,
+            self.find_next_action, self.find_prev_action, *self.tool_actions.values()]
+
+    def _make_menus(self) -> None:
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        file_menu.addAction(self.open_action)
+        self.recent_menu = file_menu.addMenu("Open &Recent")
+        self._refresh_recent_menu()
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addAction(self.close_action)
+        file_menu.addSeparator()
+        self._doc_menu_action(file_menu, "Password-Protect a Copy…", self._protect_copy)
+        self._doc_menu_action(file_menu, "Export Text…", self._export_text)
+        self._doc_menu_action(file_menu, "Export Markups to CSV…", self._export_markups)
+        file_menu.addSeparator()
+        file_menu.addAction(self._action("E&xit", self.close, QKeySequence.StandardKey.Quit))
+
+        edit = bar.addMenu("&Edit")
+        for action in (self.undo_action, self.redo_action, None, self.copy_action,
+                       self.paste_action, self.duplicate_action, self.delete_action,
+                       self.select_all_action, None, self.edit_text_action, None,
+                       self.find_action, self.find_next_action, self.find_prev_action):
+            edit.addSeparator() if action is None else edit.addAction(action)
+        edit.addSeparator()
+        edit.addAction(self._action("Pre&ferences…", self._preferences))
+
+        view = bar.addMenu("&View")
+        for action in (self.fit_width_action, self.fit_page_action, self.actual_size_action,
+                       self.zoom_in_action, self.zoom_out_action, None, self.single_page_action,
+                       self.prev_page_action, self.next_page_action, None,
+                       self.full_screen_action, self.dark_action):
+            view.addSeparator() if action is None else view.addAction(action)
+        view.addSeparator()
+        panels = view.addMenu("&Panels")
+        for dock in (self.thumb_dock, self.bookmark_dock, self.layer_dock, self.props_dock,
+                     self.chest_dock, self.search_dock, self.markups_dock):
+            panels.addAction(dock.toggleViewAction())
+        self.toolbars_menu = view.addMenu("&Toolbars")
+
+        document = bar.addMenu("&Document")
+        for text, slot, key in (
+                ("Rotate Page Clockwise", lambda: self._rotate_pages(90), "Ctrl+Shift+Plus"),
+                ("Rotate Page Counterclockwise", lambda: self._rotate_pages(270),
+                 "Ctrl+Shift+Minus"),
+                (None, None, None),
+                ("Insert Blank Page", self._insert_blank, None),
+                ("Insert Pages from PDF…", self._insert_pages, "Ctrl+Shift+I"),
+                ("Replace Current Page…", self._replace_page, None),
+                ("Delete Pages…", self._delete_pages, "Ctrl+Shift+D"),
+                ("Extract Pages…", self._extract_pages, None),
+                ("Reorder Pages…", self._reorder_dialog, None),
+                (None, None, None),
+                ("Reset Crop", self._reset_crop, None),
+                ("Split into One-Page PDFs…", self._split, None),
+                ("Merge PDFs…", self._merge, None)):
+            if text is None:
+                document.addSeparator()
+            else:
+                self._doc_menu_action(document, text, slot, key)
+        document.addSeparator()
+        document.addAction(self.tool_actions["crop"])
+
+        markup = bar.addMenu("&Markup")
+        for kind in ("select", "pan", "text_select", "zoom_area"):
+            markup.addAction(self.tool_actions[kind])
+        markup.addSeparator()
+        for kind in MARKUP_TOOLS:
+            markup.addAction(self.tool_actions[kind])
+        markup.addSeparator()
+        markup.addAction(self.lock_action)
+        markup.addAction(self.ortho_action)
+        markup.addSeparator()
+        self._doc_menu_action(markup, "Flatten All Markups…", self._flatten)
+
+        measure = bar.addMenu("Mea&sure")
+        measure.addAction(self.tool_actions["calibrate"])
+        self._doc_menu_action(measure, "Set Scale…", self._set_scale)
+        measure.addSeparator()
+        for kind in MEASURE_TOOLS:
+            measure.addAction(self.tool_actions[kind])
+
+        tools = bar.addMenu("&Tools")
+        tools.addAction(self.tool_actions["snapshot"])
+        self._doc_menu_action(tools, "Compare Documents…", self._compare_documents)
+        self._doc_menu_action(tools, "Overlay Pages…", self._overlay_pages)
+        tools.addSeparator()
+        self._doc_menu_action(tools, "Fill Form Fields…", self._fill_form)
+        self._doc_menu_action(tools, "Edit Existing Text…", self._edit_existing_text)
+        tools.addSeparator()
+        tools.addAction(self.tool_actions["redact"])
+        self._doc_menu_action(tools, "Apply Redactions…", self._apply_redactions)
+
+        help_menu = bar.addMenu("&Help")
+        help_menu.addAction(self._action("&Keyboard Shortcuts", self._show_shortcuts))
+        help_menu.addAction(self._action("&About", self._about))
+
+    def _doc_menu_action(self, menu: QMenu, text: str, slot, shortcut=None) -> QAction:
+        action = self._action(text, slot, shortcut)
+        menu.addAction(action)
+        self.document_actions.append(action)
+        return action
+
+    def _toolbar(self, title: str, name: str) -> QToolBar:
+        toolbar = QToolBar(title, self)
+        toolbar.setObjectName(name)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self.toolbars_menu.addAction(toolbar.toggleViewAction())
+        return toolbar
+
+    def _make_toolbars(self) -> None:
+        main = self._toolbar("File", "FileToolbar")
+        for action in (self.open_action, self.save_action, None, self.undo_action,
+                       self.redo_action):
+            main.addSeparator() if action is None else main.addAction(action)
+        nav = self._toolbar("Navigation", "NavigationToolbar")
+        nav.addAction(self.prev_page_action)
+        self.page_spin = QSpinBox()
+        self.page_spin.setRange(1, 1)
+        self.page_spin.setKeyboardTracking(False)
+        self.page_spin.valueChanged.connect(lambda v: self._canvas_call("go_to_page", v - 1))
+        nav.addWidget(self.page_spin)
+        self.page_total = QLabel(" / 0 ")
+        nav.addWidget(self.page_total)
+        nav.addAction(self.next_page_action)
+        nav.addSeparator()
+        self.zoom_box = QComboBox()
+        self.zoom_box.setEditable(True)
+        self.zoom_box.setMinimumWidth(80)
+        for value in ("25%", "50%", "75%", "100%", "150%", "200%", "400%", "800%"):
+            self.zoom_box.addItem(value)
+        self.zoom_box.lineEdit().returnPressed.connect(self._zoom_box_entered)
+        self.zoom_box.activated.connect(self._zoom_box_entered)
+        nav.addWidget(self.zoom_box)
+        for action in (self.zoom_out_action, self.zoom_in_action, self.fit_width_action,
+                       self.fit_page_action):
+            nav.addAction(action)
+        self.addToolBarBreak()
+        tools = self._toolbar("Markup", "MarkupToolbar")
+        tools.setStyleSheet("QToolButton:checked { background:#cfe6f8; border:1px solid #2782bd; }")
+        for kind in ("select", "pan", "text_select"):
+            tools.addAction(self.tool_actions[kind])
+        tools.addSeparator()
+        for kind in MARKUP_TOOLS:
+            tools.addAction(self.tool_actions[kind])
+        tools.addSeparator()
+        tools.addAction(self.lock_action)
+        self.addToolBarBreak()
+        measure = self._toolbar("Measure", "MeasureToolbar")
+        measure.setStyleSheet(tools.styleSheet())
+        measure.addAction(self.tool_actions["calibrate"])
+        self.scale_button = QAction("Scale: 1:1", self)
+        self.scale_button.triggered.connect(self._set_scale)
+        measure.addAction(self.scale_button)
+        measure.addSeparator()
+        for kind in MEASURE_TOOLS:
+            measure.addAction(self.tool_actions[kind])
+        measure.addSeparator()
+        for kind in ("snapshot", "crop", "redact"):
+            measure.addAction(self.tool_actions[kind])
+
+    def _make_status_bar(self) -> None:
+        status = self.statusBar()
+        self.tool_label = QLabel()
+        self.tool_label.setStyleSheet("QLabel { background:#e8f1f9; color:#123b5d; padding:2px 8px;"
+                                      " border:1px solid #9db6c9; border-radius:3px;"
+                                      " font-weight:600; }")
+        self.page_label = QLabel()
+        self.zoom_label = QLabel()
+        self.scale_label = QLabel()
+        for widget in (self.scale_label, self.page_label, self.zoom_label, self.tool_label):
+            status.addPermanentWidget(widget)
+        status.showMessage("Ready · offline · wheel to zoom · middle-drag or Space+drag to pan")
+
+    # -- documents --------------------------------------------------------------
+    def view(self) -> DocumentView | None:
+        widget = self.tabs.currentWidget()
+        return widget if isinstance(widget, DocumentView) else None
+
+    def views(self) -> list[DocumentView]:
+        return [w for w in (self.tabs.widget(i) for i in range(self.tabs.count()))
+                if isinstance(w, DocumentView)]
+
+    def _canvas_call(self, name: str, *args):
+        view = self.view()
+        if view is not None:
+            return getattr(view.canvas, name)(*args)
+        return None
 
     def open_dialog(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Open PDF", "", "PDF files (*.pdf)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Open PDF", self._last_dir(),
+                                                "PDF files (*.pdf)")
         for path in paths:
             self.open_file(path)
 
-    def open_file(self, path: str) -> None:
+    def _last_dir(self) -> str:
+        return str(self.settings.value("lastDirectory", "") or "")
+
+    def open_file(self, path: str, title: str | None = None) -> DocumentView | None:
+        path = str(Path(path).resolve())
+        for view in self.views():
+            if str(view.session.path) == path:
+                self.tabs.setCurrentWidget(view)
+                return view
         if not Path(path).is_file():
             QMessageBox.warning(self, "File not found", f"The file does not exist:\n{path}")
-            return
-        tab = PdfTab(path, self.tabs)
-        if tab.error:
-            QMessageBox.warning(self, "Could not open PDF", f"{tab.error}\n\n{path}")
-            tab.cleanup()
-            tab.deleteLater()
-            return
-        for i in range(self.tabs.count()):
-            existing = self.tabs.widget(i)
-            if isinstance(existing, PdfTab) and existing.path == tab.path:
-                tab.cleanup()
-                tab.deleteLater()
-                self.tabs.setCurrentIndex(i)
-                return
-        tab.view.annotationGesture.connect(
-            lambda gesture, target=tab: self._handle_annotation_gesture(target, gesture)
-        )
-        tab.view.selectionGesture.connect(
-            lambda gesture, target=tab: self._handle_selection_gesture(target, gesture)
-        )
-        tab.view.escapePressed.connect(self._escape_to_pointer)
-        index = self.tabs.addTab(tab, Path(path).name)
+            return None
+        password = None
+        while True:
+            try:
+                session = PdfSession(path, password)
+                break
+            except PermissionError:
+                password, accepted = QInputDialog.getText(
+                    self, "Password required", f"Enter the password for {Path(path).name}:",
+                    QLineEdit.EchoMode.Password)
+                if not accepted:
+                    return None
+            except Exception as exc:
+                QMessageBox.warning(self, "Could not open PDF", f"{exc}\n\n{path}")
+                return None
+        view = DocumentView(session, self.tabs)
+        canvas = view.canvas
+        canvas.createRequested.connect(lambda *args, v=view: self._create_markup(v, *args))
+        canvas.moveRequested.connect(lambda *args, v=view: self._move_markups(v, *args))
+        canvas.resizeRequested.connect(lambda *args, v=view: self._resize_markup(v, *args))
+        canvas.pointsRequested.connect(lambda *args, v=view: self._reshape_markup(v, *args))
+        canvas.editTextRequested.connect(lambda *args, v=view: self._edit_text(v, *args))
+        canvas.deleteRequested.connect(lambda: self._delete_markups(self._selection()))
+        canvas.selectionChanged.connect(lambda v=view: self._canvas_selection(v))
+        canvas.areaRequested.connect(lambda *args, v=view: self._area_requested(v, *args))
+        canvas.lineRequested.connect(lambda *args, v=view: self._line_requested(v, *args))
+        canvas.pageChanged.connect(lambda page, v=view: self._page_changed(v, page))
+        canvas.zoomChanged.connect(lambda zoom, v=view: self._zoom_changed(v, zoom))
+        canvas.toolFinished.connect(lambda: self.set_tool("select"))
+        canvas.contextRequested.connect(lambda *args, v=view: self._canvas_menu(v, *args))
+        canvas.textSelected.connect(lambda text: self.statusBar().showMessage(
+            f"{len(text.split())} words selected · Ctrl+C to copy", 3000))
+        session.add_listener(lambda v=view: self._document_changed(v))
+        index = self.tabs.addTab(view, title or session.path.name)
+        self.tabs.setTabToolTip(index, path)
         self.tabs.setCurrentIndex(index)
-        recent = self.settings.value("recentFiles", [], type=list)
-        recent = [p for p in recent if p != tab.path]
-        recent.insert(0, tab.path)
-        self.settings.setValue("recentFiles", recent[:12])
+        if self.start_page is not None and self.tabs.indexOf(self.start_page) >= 0:
+            self.tabs.removeTab(self.tabs.indexOf(self.start_page))
+        canvas.set_tool(self.tool if self.tool not in ("crop",) else "select")
+        canvas.ortho = self.ortho_action.isChecked()
+        if title is None:
+            self._remember_recent(path)
+        self.settings.setValue("lastDirectory", str(Path(path).parent))
+        self.statusBar().showMessage(f"Opened {session.path.name}", 3000)
+        return view
+
+    def _remember_recent(self, path: str) -> None:
+        recent = [p for p in self.settings.value("recentFiles", [], type=list) if p != path]
+        self.settings.setValue("recentFiles", [path] + recent[:11])
         self._refresh_recent_menu()
-        self.statusBar().showMessage(f"Opened locally: {Path(path).name}", 4000)
 
     def _refresh_recent_menu(self) -> None:
         self.recent_menu.clear()
@@ -980,829 +538,1174 @@ class MainWindow(QMainWindow):
             action.setToolTip(path)
             action.triggered.connect(lambda checked=False, p=path: self.open_file(p))
         if not recent:
-            empty = self.recent_menu.addAction("No recent files")
-            empty.setEnabled(False)
+            self.recent_menu.addAction("No recent files").setEnabled(False)
 
-    def _active(self) -> PdfTab | None:
-        tab = self.tabs.currentWidget()
-        return tab if isinstance(tab, PdfTab) else None
+    def save(self) -> bool:
+        view = self.view()
+        if view is None:
+            return False
+        if view.session.path in self._temp_files:
+            return self.save_as()
+        return self._save_view(view)
 
-    def _refresh_active_document(self, _index: int = -1) -> None:
-        tab = self._active()
-        if tab is None:
-            self.page_list.setModel(None)
-            self.bookmark_tree.setModel(None)
-            self.search_results.setModel(None)
-            self.page_number.setMaximum(1)
-            self.page_number.setValue(1)
-            self.page_total.setText("of 0")
-            return
-        self.page_list.setModel(tab.document.pageModel())
-        self.bookmark_tree.setModel(tab.bookmarks)
-        self.search_results.setModel(tab.search)
-        self.page_number.blockSignals(True)
-        self.page_number.setMaximum(max(1, tab.document.pageCount()))
-        self.page_number.setValue(tab.view.pageNavigator().currentPage() + 1)
-        self.page_number.blockSignals(False)
-        self.page_total.setText(f"of {tab.document.pageCount()}")
+    def _save_view(self, view: DocumentView, path: str | None = None) -> bool:
+        self.properties.flush_comment()
         try:
-            tab.view.pageNavigator().currentPageChanged.connect(self._current_page_changed)
-        except RuntimeError:
-            pass
-
-    def _current_page_changed(self, page: int) -> None:
-        if self._active() is None:
-            return
-        tab = self._active()
-        self.page_number.blockSignals(True)
-        self.page_number.setValue(page + 1)
-        self.page_number.blockSignals(False)
-        self.page_list.setCurrentIndex(tab.document.pageModel().index(page, 0))
-        self.statusBar().showMessage(f"Page {tab.document.pageLabel(page)} of {tab.document.pageCount()}")
-
-    def _jump_to_page_index(self, index) -> None:
-        tab = self._active()
-        if tab:
-            tab.view.pageNavigator().jump(index.row(), QPointF(0, 0))
-
-    def _jump_to_page_number(self, value: int) -> None:
-        tab = self._active()
-        if tab and tab.document.pageCount():
-            tab.view.pageNavigator().jump(value - 1, QPointF(0, 0))
-
-    def _jump_to_bookmark(self, index) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        page = index.data(int(QPdfBookmarkModel.Role.Page))
-        location = index.data(int(QPdfBookmarkModel.Role.Location))
-        if page is not None and int(page) >= 0:
-            tab.view.pageNavigator().jump(int(page), location if isinstance(location, QPointF) else QPointF())
-
-    def _jump_to_search_result(self, index) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        tab.view.setCurrentSearchResultIndex(index.row())
-        link = tab.search.resultAtIndex(index.row())
-        tab.view.pageNavigator().jump(link)
-
-    def _start_search(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        term = self.search_box.text().strip()
-        tab.search.setSearchString(term)
-        self.search_dock.show()
-        self.search_dock.raise_()
-        if not term:
-            self.statusBar().showMessage("Enter text to search")
-            return
-        QTimer.singleShot(100, lambda: self._step_search(1))
-
-    def _step_search(self, direction: int) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        count = tab.search.count()
-        if count <= 0:
-            self.statusBar().showMessage("No matches found")
-            return
-        current = tab.view.currentSearchResultIndex()
-        nxt = (current + direction) % count if current >= 0 else (0 if direction > 0 else count - 1)
-        tab.view.setCurrentSearchResultIndex(nxt)
-        tab.view.pageNavigator().jump(tab.search.resultAtIndex(nxt))
-        self.statusBar().showMessage(f"Match {nxt + 1} of {count}")
-
-    def _change_page_mode(self, index: int) -> None:
-        tab = self._active()
-        if tab:
-            tab.view.setPageMode(self.mode.itemData(index))
-
-    def _change_zoom(self, index: int) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        zoom_mode = self.zoom.itemData(index)
-        tab.view.setZoomMode(zoom_mode)
-        if zoom_mode == QPdfView.ZoomMode.Custom:
-            tab.view.setZoomFactor(1.0)
-
-    def _output_path(self, suffix: str) -> str | None:
-        tab = self._active()
-        if not tab:
-            return None
-        suggested = str(Path(tab.path).with_name(Path(tab.path).stem + suffix + ".pdf"))
-        path, _ = QFileDialog.getSaveFileName(self, "Save modified PDF as", suggested, "PDF files (*.pdf)")
-        return path or None
-
-    def _finish_page_operation(self, output: str) -> None:
-        self.open_file(output)
-        self.statusBar().showMessage(f"Saved a new PDF: {output}", 5000)
-
-    def _rotate_current_page(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        try:
-            tab.rotate_current_page()
-            self._set_tab_modified(tab)
-            self._refresh_active_document()
-            self.statusBar().showMessage("Rotation is pending. Save with Ctrl+S or close and choose Save.", 6000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not rotate page", str(exc))
-
-    def _delete_current_page(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        if QMessageBox.question(self, "Delete page", "Delete the current page? This change will be pending until you save.") != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            tab.delete_current_page()
-            self._refresh_active_document()
-            self._set_tab_modified(tab)
-            self.statusBar().showMessage("Page deletion is pending. Save with Ctrl+S or close and choose Save.", 6000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not delete page", str(exc))
-
-    def _add_sticky_note(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        note, accepted = QInputDialog.getMultiLineText(self, "Add sticky note", "Note text:")
-        if not accepted or not note.strip():
-            return
-        try:
-            tab.add_sticky_note(note)
-            self._set_tab_modified(tab)
-            self.statusBar().showMessage("Sticky note is pending. Save with Ctrl+S or close and choose Save.", 6000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not add sticky note", str(exc))
-
-    def _set_tab_modified(self, tab: PdfTab) -> None:
-        index = self.tabs.indexOf(tab)
-        self.tabs.setTabText(index, Path(tab.path).name + (" *" if tab.dirty else ""))
-
-
-    def _extract_current_page(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        output = self._output_path("_page_extracted")
-        if not output:
-            return
-        try:
-            extract_pages(tab.edit_session.working_path, output,
-                          [tab.view.pageNavigator().currentPage()], tab.password)
-            self._finish_page_operation(output)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not extract page", str(exc))
-
-    def _reorder_pages(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        order, accepted = QInputDialog.getText(
-            self, "Reorder pages", f"Enter all {tab.document.pageCount()} page numbers in the new order, separated by commas:"
-        )
-        if not accepted:
-            return
-        try:
-            values = [int(part.strip()) - 1 for part in order.split(",")]
-            tab.reorder_pages(values)
-            self._refresh_active_document()
-            self._set_tab_modified(tab)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not reorder pages", str(exc))
-
-    def _crop_current_page(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        text, accepted = QInputDialog.getText(
-            self, "Crop current page",
-            "Enter left,bottom,right,top coordinates in PDF points:"
-        )
-        if not accepted:
-            return
-        try:
-            values = [float(part.strip()) for part in text.split(",")]
-            if len(values) != 4:
-                raise ValueError("Enter exactly four coordinates.")
-            tab.crop_current_page(*values)
-            self._set_tab_modified(tab)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not crop page", str(exc))
-
-    def _insert_pages(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        source, _ = QFileDialog.getOpenFileName(self, "Choose PDF pages to insert", "", "PDF files (*.pdf)")
-        if not source:
-            return
-        before, accepted = QInputDialog.getInt(
-            self, "Insert pages", f"Insert before page (1 to {tab.document.pageCount() + 1}):",
-            max(1, tab.view.pageNavigator().currentPage() + 1), 1, tab.document.pageCount() + 1
-        )
-        if not accepted:
-            return
-        try:
-            tab.insert_pages(source, before - 1)
-            self._refresh_active_document()
-            self._set_tab_modified(tab)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not insert pages", str(exc))
-
-    def _replace_current_page(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        source, _ = QFileDialog.getOpenFileName(self, "Choose replacement PDF page", "", "PDF files (*.pdf)")
-        if not source:
-            return
-        try:
-            tab.replace_current_page(source)
-            self._refresh_active_document()
-            self._set_tab_modified(tab)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not replace page", str(exc))
-
-    def _split_pdf(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        directory = QFileDialog.getExistingDirectory(self, "Choose a folder for the split PDF pages")
-        if not directory:
-            return
-        try:
-            paths = split_pdf(tab.edit_session.working_path, directory, tab.password)
-            self.statusBar().showMessage(f"Created {len(paths)} local PDF files in {directory}", 6000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not split PDF", str(exc))
-
-    def _fill_form_fields(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        try:
-            fields = read_form_fields(tab.edit_session.working_path, tab.password)
-            if not fields:
-                QMessageBox.information(self, "No form fields", "This PDF does not contain editable AcroForm fields.")
-                return
-            prompt = "Enter one field=value pair per line. Fields found:\n" + "\n".join(fields)
-            text, accepted = QInputDialog.getMultiLineText(self, "Fill PDF form", prompt)
-            if not accepted:
-                return
-            values = {}
-            for line in text.splitlines():
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    values[key.strip()] = value.strip()
-            if not values:
-                return
-            tab.fill_fields(values)
-            self._set_tab_modified(tab)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not fill form", str(exc))
-
-    def _edit_existing_text(self) -> None:
-        """Replace exact page text using redaction, staged in the per-tab undo history."""
-        tab = self._active()
-        if not tab:
-            return
-        page = max(0, tab.view.pageNavigator().currentPage())
-        old_text, accepted = QInputDialog.getText(
-            self, "Edit existing text", "Exact text to find on the current page:"
-        )
-        if not accepted or not old_text:
-            return
-        new_text, accepted = QInputDialog.getText(
-            self, "Edit existing text", "Replacement text (leave empty to remove it):"
-        )
-        if not accepted:
-            return
-        try:
-            tab.edit_session.apply_operation(
-                replace_existing_text, page, old_text, new_text, password=tab.password
-            )
-            tab._reload_working_copy(page)
-            self._set_tab_modified(tab)
-            self.statusBar().showMessage(
-                "Text replacement staged · Ctrl+Z to undo · Ctrl+S to save", 6000
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not edit text", str(exc))
-
-    def _export_text(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        output, _ = QFileDialog.getSaveFileName(
-            self, "Export PDF text", str(Path(tab.path).with_suffix(".txt")), "Text files (*.txt)"
-        )
-        if not output:
-            return
-        try:
-            extract_text_file(tab.edit_session.working_path, output, tab.password)
-            self.statusBar().showMessage(f"Exported local text to {output}", 5000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not export text", str(exc))
-
-    def _update_tool_indicator(self, tool: str) -> None:
-        labels = {
-            "select": "Select", "text": "Text Box", "note": "Sticky Note",
-            "highlight": "Highlight", "underline": "Underline",
-            "strikeout": "Strikethrough", "pen": "Pen", "line": "Line",
-            "arrow": "Arrow", "rectangle": "Rectangle", "ellipse": "Ellipse",
-        }
-        detail = " · Text Box" if self._selected_text_box is not None and tool == "select" else ""
-        if hasattr(self, "active_tool_indicator"):
-            self.active_tool_indicator.setText(f"TOOL  {labels.get(tool, tool.title())}{detail}")
-            self.active_tool_indicator.setToolTip(
-                f"Current tool: {labels.get(tool, tool.title())}{detail}"
-            )
-
-    @staticmethod
-    def _pdf_rect_to_view(tab: PdfTab, page_index: int, rect: tuple,
-                          location: QPointF, zoom: float, page_box) -> QRect:
-        page_size = tab.document.pagePointSize(page_index)
-        x_margin = max(0.0, (tab.view.viewport().width()
-                             - float(page_size.width()) * zoom) / 2.0)
-        left = x_margin + (float(rect[0]) - float(page_box.left) - location.x()) * zoom
-        right = x_margin + (float(rect[2]) - float(page_box.left) - location.x()) * zoom
-        top = (float(page_box.top) - float(rect[3]) - location.y()) * zoom
-        bottom = (float(page_box.top) - float(rect[1]) - location.y()) * zoom
-        return QRect(round(left), round(top), max(2, round(right - left)),
-                     max(2, round(bottom - top)))
-
-    def _handle_selection_gesture(self, tab: PdfTab, gesture: dict) -> None:
-        if self.tabs.indexOf(tab) < 0 or self._text_editor is not None:
-            return
-        page_index = int(gesture["page"])
-        start, end = gesture["start"], gesture["end"]
-        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
-        if reader.is_encrypted and tab.password:
-            reader.decrypt(tab.password)
-        if not 0 <= page_index < len(reader.pages):
-            return
-        page_box = reader.pages[page_index].mediabox
-        start_pdf = self._viewport_to_pdf(
-            tab, page_index, start, gesture["location"], gesture["zoom"], page_box
-        )
-        end_pdf = self._viewport_to_pdf(
-            tab, page_index, end, gesture["location"], gesture["zoom"], page_box
-        )
-        operations = tab.edit_session.operations
-        hit = None
-        for state_index in range(tab.edit_session.cursor, 0, -1):
-            record = operations[state_index]
-            if not record or record[0] is not add_rich_text_box:
-                continue
-            args = record[1]
-            if int(args[0]) != page_index:
-                continue
-            rect = tuple(float(value) for value in args[1])
-            if rect[0] <= start_pdf[0] <= rect[2] and rect[1] <= start_pdf[1] <= rect[3]:
-                hit = (state_index, page_index, rect, args)
-                break
-        if hit is None:
-            self._selected_text_box = None
-            tab.view.show_selected_object(None)
-            self._update_tool_indicator(tab.view.annotation_tool)
-            return
-
-        state_index, page_index, rect, args = hit
-        self._selected_text_box = (tab, state_index, page_index, rect)
-        dx, dy = end_pdf[0] - start_pdf[0], end_pdf[1] - start_pdf[1]
-        if abs(dx) > 1.5 or abs(dy) > 1.5:
-            width, height = rect[2] - rect[0], rect[3] - rect[1]
-            dx = max(float(page_box.left) - rect[0],
-                     min(float(page_box.right) - rect[2], dx))
-            dy = max(float(page_box.bottom) - rect[1],
-                     min(float(page_box.top) - rect[3], dy))
-            moved_rect = (rect[0] + dx, rect[1] + dy,
-                          rect[0] + dx + width, rect[1] + dy + height)
-            new_args = (args[0], moved_rect, *args[2:])
-            try:
-                tab.edit_session.replace_operation(
-                    state_index, add_rich_text_box, *new_args, **record[2]
-                )
-                rect = moved_rect
-                self._selected_text_box = (tab, state_index, page_index, rect)
-                tab._reload_working_copy(page_index)
-                self._set_tab_modified(tab)
-                self.statusBar().showMessage(
-                    "Text box moved · Ctrl+Z to undo · Ctrl+S to save", 4500
-                )
-            except Exception as exc:
-                QMessageBox.warning(self, "Could not move text box", str(exc))
-                return
-        screen_rect = self._pdf_rect_to_view(
-            tab, page_index, rect, gesture["location"], gesture["zoom"], page_box
-        )
-        tab.view.show_selected_object(screen_rect)
-        self._update_tool_indicator("select")
-
-    def _activate_annotation_tool(self, kind: str) -> None:
-        tab = self._active()
-        if not tab:
-            self.statusBar().showMessage("Open a PDF before selecting a tool.", 4000)
-            return
-        if self._text_editor is not None and kind != "select":
-            self.statusBar().showMessage("Place or cancel the active text box first.", 4000)
-            return
-        tab.view.set_annotation_tool(kind)
-        if kind == "select":
-            self._selected_text_box = None
-            tab.view.show_selected_object(None)
-        action = self.annotation_actions_by_kind.get(kind)
-        if action is not None:
-            action.setChecked(True)
-        tab.view.setFocus()
-        labels = {
-            "select": "Select", "text": "Text Box", "note": "Sticky Note",
-            "highlight": "Highlight", "underline": "Underline",
-            "strikeout": "Strikethrough", "pen": "Freehand Pen",
-            "line": "Line", "arrow": "Arrow", "rectangle": "Rectangle", "ellipse": "Ellipse",
-        }
-        self._update_tool_indicator(kind)
-        message = "Click or drag on the page"
-        if kind == "select":
-            message = "Click a placed text box to select it; drag it to move"
-        self.statusBar().showMessage(
-            f"{labels.get(kind, kind.title())} tool active · {message} · Esc returns to Select",
-            5000,
-        )
-
-    @staticmethod
-    def _viewport_to_pdf(tab: PdfTab, page_index: int, point: tuple[float, float],
-                         location: QPointF, zoom: float, box) -> tuple[float, float]:
-        page = tab.document.pagePointSize(page_index)
-        view_width = float(page.width()) * zoom
-        x_margin = max(0.0, (tab.view.viewport().width() - view_width) / 2.0)
-        x_from_top_left = location.x() + max(0.0, point[0] - x_margin) / zoom
-        y_from_top_left = location.y() + max(0.0, point[1]) / zoom
-        x_from_top_left = min(float(page.width()), max(0.0, x_from_top_left))
-        y_from_top_left = min(float(page.height()), max(0.0, y_from_top_left))
-        return float(box.left) + x_from_top_left, float(box.top) - y_from_top_left
-
-    def _begin_text_box(self, tab: PdfTab, gesture: dict) -> None:
-        start_x, start_y = gesture["start"]
-        end_x, end_y = gesture["end"]
-        left, top = min(start_x, end_x), min(start_y, end_y)
-        width, height = abs(end_x - start_x), abs(end_y - start_y)
-        if width < 48 or height < 28:
-            width, height = 230, 88
-        viewport = tab.view.viewport()
-        width = min(max(110, int(width)), max(110, viewport.width() - 8))
-        height = min(max(54, int(height)), max(54, viewport.height() - 8))
-        left = max(0, min(int(left), max(0, viewport.width() - width)))
-        top = max(0, min(int(top), max(0, viewport.height() - height)))
-        editor = TextPlacementEditor(viewport, QRect(left, top, width, height))
-        self._text_editor = editor
-        self._text_active_tab = tab
-        self._text_context = {
-            "page": int(gesture["page"]),
-            "location": QPointF(gesture["location"]),
-            "zoom": float(gesture["zoom"]),
-        }
-        editor.cancel_action.triggered.connect(self._cancel_text_box)
-        editor.commit_action.triggered.connect(self._commit_text_box)
-        editor.text_edit.placeRequested.connect(self._commit_text_box)
-        editor.show()
-        editor.raise_()
-        self.text_toolbar.setEnabled(True)
-        self._apply_text_style()
-        editor.text_edit.setFocus()
-        self.statusBar().showMessage(
-            "Type in the outlined box · drag the blue corner to resize · Place or Ctrl+Enter to finish"
-        )
-
-    def _text_style(self) -> dict:
-        return {
-            "size": self.text_size.value(),
-            "bold": self.text_bold.isChecked(),
-            "italic": self.text_italic.isChecked(),
-            "underline": self.text_underline.isChecked(),
-            "letter_spacing": self.text_letter_spacing.value(),
-            "line_spacing": self.text_line_spacing.value(),
-            "alignment": self.text_alignment.currentData(),
-        }
-
-    def _apply_text_style(self, *_args) -> None:
-        editor = self._text_editor
-        if editor is None:
-            return
-        style = self._text_style()
-        font = QFont("Helvetica")
-        font.setPointSizeF(float(style["size"]))
-        font.setBold(bool(style["bold"]))
-        font.setItalic(bool(style["italic"]))
-        font.setUnderline(bool(style["underline"]))
-        char_format = QTextCharFormat()
-        char_format.setFont(font)
-        char_format.setFontLetterSpacing(float(style["letter_spacing"]))
-        block_format = QTextBlockFormat()
-        block_format.setLineHeight(
-            float(style["line_spacing"]) * 100.0,
-            # PySide6 6.12 accepts only the integer value of the enum here.
-            QTextBlockFormat.LineHeightTypes.ProportionalHeight.value,
-        )
-        alignment = {
-            "left": Qt.AlignmentFlag.AlignLeft,
-            "center": Qt.AlignmentFlag.AlignHCenter,
-            "right": Qt.AlignmentFlag.AlignRight,
-            "justify": Qt.AlignmentFlag.AlignJustify,
-        }.get(style["alignment"], Qt.AlignmentFlag.AlignLeft)
-        block_format.setAlignment(alignment)
-        cursor = editor.text_edit.textCursor()
-        position = cursor.position()
-        cursor.select(QTextCursor.SelectionType.Document)
-        cursor.mergeCharFormat(char_format)
-        cursor.mergeBlockFormat(block_format)
-        cursor.clearSelection()
-        cursor.setPosition(min(position, editor.text_edit.document().characterCount() - 1))
-        editor.text_edit.setTextCursor(cursor)
-        editor.text_edit.setCurrentCharFormat(char_format)
-
-    def _escape_to_pointer(self) -> None:
-        """Switch back to Select, cancelling a live placement when necessary."""
-        if self._text_editor is not None:
-            self._cancel_text_box()
-        tab = self._active()
-        if tab is not None:
-            tab.view.set_annotation_tool("select")
-            tab.view.show_selected_object(None)
-            tab.view.setFocus()
-        self._selected_text_box = None
-        if hasattr(self, "annotation_actions_by_kind"):
-            self.annotation_actions_by_kind["select"].setChecked(True)
-        self._update_tool_indicator("select")
-        self.statusBar().showMessage(
-            "Select tool active · click and drag placed text boxes to move them", 4000
-        )
-
-    def _cancel_text_box(self) -> None:
-        if self._text_editor is not None:
-            self._text_editor.deleteLater()
-        tab = self._text_active_tab
-        self._text_editor = None
-        self._text_active_tab = None
-        self._text_context = None
-        self.text_toolbar.setEnabled(False)
-        if tab is not None:
-            tab.view.set_annotation_tool("select")
-            tab.view.show_selected_object(None)
-            tab.view.setFocus()
-        if hasattr(self, "annotation_actions_by_kind"):
-            self.annotation_actions_by_kind["select"].setChecked(True)
-        self._update_tool_indicator("select")
-        self.statusBar().showMessage("Text placement cancelled · Select tool active", 3000)
-
-    def _commit_text_box(self) -> None:
-        editor = self._text_editor
-        tab = self._text_active_tab
-        context = self._text_context
-        if editor is None or tab is None or context is None:
-            return
-        text = editor.text_edit.toPlainText()
-        if not text.strip():
-            self.statusBar().showMessage("Type some text before placing it", 4000)
-            editor.text_edit.setFocus()
-            return
-        geometry = editor.geometry()
-        view_rect = tab.view.viewport().rect()
-        left = max(0, min(geometry.left(), view_rect.right()))
-        top = max(0, min(geometry.top(), view_rect.bottom()))
-        right = max(left + 1, min(geometry.right(), view_rect.right()))
-        bottom = max(top + 1, min(geometry.bottom(), view_rect.bottom()))
-        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
-        if reader.is_encrypted and tab.password:
-            reader.decrypt(tab.password)
-        page_index = int(context["page"])
-        page_box = reader.pages[page_index].mediabox
-        top_left = self._viewport_to_pdf(
-            tab, page_index, (float(left), float(top)),
-            context["location"], context["zoom"], page_box
-        )
-        bottom_right = self._viewport_to_pdf(
-            tab, page_index, (float(right), float(bottom)),
-            context["location"], context["zoom"], page_box
-        )
-        pdf_rect = (top_left[0], bottom_right[1], bottom_right[0], top_left[1])
-        try:
-            tab.edit_session.apply_operation(
-                add_rich_text_box, page_index, pdf_rect, text, self._text_style(),
-                password=tab.password,
-            )
-            editor.deleteLater()
-            self._text_editor = None
-            self._text_active_tab = None
-            self._text_context = None
-            self.text_toolbar.setEnabled(False)
-            tab._reload_working_copy(page_index)
-            self._set_tab_modified(tab)
-            self._selected_text_box = None
-            tab.view.set_annotation_tool("select")
-            self.annotation_actions_by_kind["select"].setChecked(True)
-            self._update_tool_indicator("select")
-            self.statusBar().showMessage(
-                "Text box placed · drag it with Select to reposition · Ctrl+Z to undo", 5000
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not place text", str(exc))
-            editor.text_edit.setFocus()
-
-    def _handle_annotation_gesture(self, tab: PdfTab, gesture: dict) -> None:
-        if self.tabs.indexOf(tab) < 0:
-            return
-        kind = gesture["kind"]
-        page = int(gesture["page"])
-        if kind == "text":
-            self._begin_text_box(tab, gesture)
-            return
-        location = gesture["location"]
-        zoom = float(gesture["zoom"])
-        reader = PdfReader(str(tab.edit_session.working_path), strict=False)
-        if reader.is_encrypted and tab.password:
-            reader.decrypt(tab.password)
-        box = reader.pages[page].mediabox
-        start = self._viewport_to_pdf(tab, page, gesture["start"], location, zoom, box)
-        end = self._viewport_to_pdf(tab, page, gesture["end"], location, zoom, box)
-        points = [
-            self._viewport_to_pdf(tab, page, point, location, zoom, box)
-            for point in gesture["points"]
-        ]
-        if kind == "note":
-            x, y = start
-            note_width, note_height = 160.0, 92.0
-            x = min(max(x, float(box.left)), float(box.right) - note_width)
-            y = min(max(y, float(box.bottom)), float(box.top) - note_height)
-            rect = (x, y, x + note_width, y + note_height)
-            text, accepted = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
-            if not accepted or not text.strip():
-                return
-        else:
-            text = ""
-            if kind == "text":
-                text, accepted = QInputDialog.getMultiLineText(self, "Text box", "Text:")
-                if not accepted or not text.strip():
-                    return
-            x1, y1 = start
-            x2, y2 = end
-            if abs(x2 - x1) < 3:
-                x2 = x1 + 3
-            if abs(y2 - y1) < 3:
-                y2 = y1 + 3
-            rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-            if kind == "text" and (abs(x2 - x1) < 24 or abs(y2 - y1) < 16):
-                width = min(160.0, max(3.0, float(box.right) - rect[0]))
-                height = min(42.0, max(3.0, float(box.top) - rect[1]))
-                rect = (rect[0], rect[1], rect[0] + width, rect[1] + height)
-        try:
-            tab.edit_session.apply_operation(
-                add_pdf_annotation, page, kind, rect, text, points, password=tab.password
-            )
-            tab._reload_working_copy(page)
-            self._set_tab_modified(tab)
-            tool_name = kind.replace("strikeout", "strikethrough").replace("pen", "freehand")
-            self._update_tool_indicator(kind)
-            self.statusBar().showMessage(
-                f"{tool_name.title()} placed · Ctrl+Z to undo · Ctrl+S to save · Esc selects", 5000
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not add annotation", str(exc))
-
-    def _protect_copy(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        password, accepted = QInputDialog.getText(
-            self, "Password-protect a copy", "Enter a password for the new PDF:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted:
-            return
-        confirm, accepted = QInputDialog.getText(
-            self, "Confirm password", "Enter the password again:",
-            QLineEdit.EchoMode.Password,
-        )
-        if not accepted:
-            return
-        if password != confirm:
-            QMessageBox.warning(self, "Passwords do not match", "Enter the same password twice.")
-            return
-        suggested = str(Path(tab.path).with_name(Path(tab.path).stem + "_protected.pdf"))
-        output, _ = QFileDialog.getSaveFileName(
-            self, "Save password-protected copy", suggested, "PDF files (*.pdf)"
-        )
-        if not output:
-            return
-        try:
-            protect_pdf(tab.edit_session.working_path, output, password, tab.password)
-            self.statusBar().showMessage(f"Created password-protected PDF: {output}", 6000)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not protect PDF", str(exc))
-
-    def _merge_documents(self) -> None:
-        sources, _ = QFileDialog.getOpenFileNames(self, "Choose PDFs to merge", "", "PDF files (*.pdf)")
-        if len(sources) < 2:
-            return
-        output, _ = QFileDialog.getSaveFileName(self, "Save merged PDF as", "", "PDF files (*.pdf)")
-        if not output:
-            return
-        try:
-            merge_pdfs(sources, output)
-            self._finish_page_operation(output)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could not merge PDFs", str(exc))
-
-    def _save_active(self) -> None:
-        tab = self._active()
-        if not tab:
-            return
-        try:
-            tab.save_edits()
-            self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name)
-            self.statusBar().showMessage("Saved changes to the original PDF.", 5000)
+            view.session.save(path)
         except Exception as exc:
             QMessageBox.critical(self, "Could not save PDF", str(exc))
+            return False
+        self._update_tab_title(view)
+        self.statusBar().showMessage(f"Saved {view.session.path}", 4000)
+        return True
 
-    def _undo_active(self) -> None:
-        tab = self._active()
-        if not tab or not tab.edit_session.can_undo:
-            return
-        tab.undo_edit()
-        self._set_tab_modified(tab)
-
-    def _redo_active(self) -> None:
-        tab = self._active()
-        if not tab or not tab.edit_session.can_redo:
-            return
-        tab.redo_edit()
-        self.tabs.setTabText(self.tabs.indexOf(tab), Path(tab.path).name + (" *" if tab.dirty else ""))
-
-    def _confirm_pending_edits(self, tab: PdfTab) -> bool:
-        if not tab.dirty:
+    def save_as(self) -> bool:
+        view = self.view()
+        if view is None:
+            return False
+        path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", str(view.session.path),
+                                              "PDF files (*.pdf)")
+        if not path:
+            return False
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        if self._save_view(view, path):
+            self.tabs.setTabToolTip(self.tabs.indexOf(view), path)
+            self._remember_recent(str(Path(path).resolve()))
             return True
+        return False
+
+    def _confirm_close(self, view: DocumentView) -> bool:
+        if not view.session.dirty:
+            return True
+        self.tabs.setCurrentWidget(view)
         answer = QMessageBox.question(
-            self, "Unsaved changes",
-            f"Save changes to {Path(tab.path).name} before closing?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
-        )
+            self, "Unsaved changes", f"Save changes to {view.session.path.name} before closing?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
         if answer == QMessageBox.StandardButton.Cancel:
             return False
-        if answer == QMessageBox.StandardButton.Discard:
-            tab.discard_edits()
-            return True
-        try:
-            tab.save_edits()
-            return True
-        except Exception as exc:
-            QMessageBox.critical(self, "Could not save PDF", str(exc))
-            return False
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save()
+        return True
+
+    def _close_tab(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        if isinstance(widget, DocumentView):
+            if not self._confirm_close(widget):
+                return
+            if self.clipboard and self.clipboard[0] is widget.session:
+                self.clipboard = None
+            widget.session.close()
+        if index >= 0:
+            self.tabs.removeTab(index)
+        if widget is not None and widget is not self.start_page:
+            widget.deleteLater()
+        if self.tabs.count() == 0:
+            self.start_page = self._make_start_page()
+            self.tabs.addTab(self.start_page, "Start")
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        pdf_tabs = [self.tabs.widget(i) for i in range(self.tabs.count())]
-        pdf_tabs = [tab for tab in pdf_tabs if isinstance(tab, PdfTab)]
-        for tab in pdf_tabs:
-            if not self._confirm_pending_edits(tab):
+        for view in self.views():
+            if not self._confirm_close(view):
                 event.ignore()
                 return
-        for tab in pdf_tabs:
-            tab.cleanup()
+        for view in self.views():
+            view.session.close()
+        for path in self._temp_files:
+            path.unlink(missing_ok=True)
         self.settings.setValue("windowGeometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
+        self.settings.setValue("layoutVersion", LAYOUT_VERSION)
         event.accept()
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        for url in event.mimeData().urls():
+            if url.toLocalFile().lower().endswith(".pdf"):
+                self.open_file(url.toLocalFile())
+
+    # -- state refresh -------------------------------------------------------------
+    def _tab_changed(self, _index: int) -> None:
+        view = self.view()
+        if view is not None:
+            view.canvas.set_tool(self.tool)
+            view.canvas.ortho = self.ortho_action.isChecked()
+        self._refresh_panels()
+        self._refresh_thumbnails()
+        self._update_actions()
+
+    def _document_changed(self, view: DocumentView) -> None:
+        self._update_tab_title(view)
+        if view is self.view():
+            self._refresh_timer.start()
+            self._thumb_timer.start()
+            self._update_actions()
+
+    def _update_tab_title(self, view: DocumentView) -> None:
+        index = self.tabs.indexOf(view)
+        if index >= 0:
+            self.tabs.setTabText(index, view.title)
+
+    def _refresh_panels(self) -> None:
+        view = self.view()
+        if view is None:
+            self.markups_list.set_rows([])
+            self.bookmarks.set_toc([])
+            self.layers.set_layers([])
+            self.search.set_results([])
+            self._show_properties()
+            self._update_status()
+            return
+        doc = view.session.doc
+        self.markups_list.set_rows(markups.list_markups(doc))
+        self.markups_list.select_keys(view.canvas.selection)
+        self.bookmarks.set_toc(doc.get_toc(simple=True))
+        try:
+            self.layers.set_layers(doc.layer_ui_configs())
+        except Exception:
+            self.layers.set_layers([])
+        self.search.set_results([(page, context) for page, _r, context in view.search_hits])
+        self._show_properties()
+        self._update_status()
+
+    def _refresh_thumbnails(self) -> None:
+        view = self.view()
+        if view is None:
+            self.thumbnails.clear()
+            return
+        doc = view.session.doc
+        labels = []
+        for index in range(doc.page_count):
+            label = doc[index].get_label() or str(index + 1)
+            labels.append(label if label == str(index + 1) else f"{index + 1} ({label})")
+        self.thumbnails.populate(doc.page_count, labels,
+                                 lambda index, c=view.canvas: c.page_thumbnail(index, 140))
+        self.thumbnails.set_current(view.canvas.current_page)
+
+    def _update_actions(self) -> None:
+        view = self.view()
+        has_doc = view is not None
+        for action in self.document_actions:
+            action.setEnabled(has_doc)
+        session = view.session if view else None
+        self.undo_action.setEnabled(bool(session and session.can_undo))
+        self.redo_action.setEnabled(bool(session and session.can_redo))
+        self.undo_action.setText(f"&Undo {session.undo_label}" if session and session.can_undo
+                                 else "&Undo")
+        self.redo_action.setText(f"&Redo {session.redo_label}" if session and session.can_redo
+                                 else "&Redo")
+        selection = bool(view and view.canvas.selection)
+        for action in (self.copy_action, self.duplicate_action, self.delete_action,
+                       self.edit_text_action):
+            action.setEnabled(selection or (action is self.copy_action and has_doc))
+        self.paste_action.setEnabled(has_doc and self.clipboard is not None)
+        if view is not None:
+            count = view.session.page_count
+            self.page_spin.blockSignals(True)
+            self.page_spin.setRange(1, count)
+            self.page_spin.setValue(view.canvas.current_page + 1)
+            self.page_spin.blockSignals(False)
+            self.page_total.setText(f" / {count} ")
+            self.single_page_action.setChecked(view.canvas.single_page)
+        else:
+            self.page_total.setText(" / 0 ")
+
+    def _update_status(self) -> None:
+        view = self.view()
+        self.tool_label.setText(f"TOOL  {tool_label(self.tool)}"
+                                + ("  🔒" if self.tool_locked else ""))
+        if view is None:
+            self.page_label.setText("")
+            self.zoom_label.setText("")
+            self.scale_label.setText("")
+            self.scale_button.setText("Scale: —")
+            return
+        canvas = view.canvas
+        doc = view.session.doc
+        page = min(canvas.current_page, doc.page_count - 1)
+        self.page_label.setText(f"Page {page + 1} of {doc.page_count}")
+        self.zoom_label.setText(f"{canvas.zoom * 100:.0f}%")
+        scale = markups.page_scale(doc[page])
+        self.scale_label.setText(f"Scale: {scale.label}")
+        self.scale_button.setText(f"Scale: {scale.label}")
+
+    def _page_changed(self, view: DocumentView, page: int) -> None:
+        if view is not self.view():
+            return
+        self.page_spin.blockSignals(True)
+        self.page_spin.setValue(page + 1)
+        self.page_spin.blockSignals(False)
+        self.thumbnails.set_current(page)
+        self.bookmarks.current_page = page
+        self._update_status()
+
+    def _zoom_changed(self, view: DocumentView, zoom: float) -> None:
+        if view is self.view():
+            self.zoom_box.setEditText(f"{zoom * 100:.0f}%")
+            self._update_status()
+
+    def _zoom_box_entered(self, *_args) -> None:
+        text = self.zoom_box.currentText().strip().rstrip("%")
+        try:
+            self._set_zoom(float(text) / 100)
+        except ValueError:
+            pass
+
+    def _set_zoom(self, zoom: float) -> None:
+        view = self.view()
+        if view:
+            view.canvas.fit_mode = ""
+            view.canvas.set_zoom(zoom)
+
+    def _step_page(self, step: int) -> None:
+        view = self.view()
+        if view:
+            view.canvas.go_to_page(view.canvas.current_page + step)
+
+    def _toggle_single_page(self, single: bool) -> None:
+        view = self.view()
+        if view:
+            view.canvas.set_single_page(single)
 
     def _toggle_full_screen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
+    def _set_ortho(self, on: bool) -> None:
+        for view in self.views():
+            view.canvas.ortho = on
+
     def _set_dark_theme(self, enabled: bool) -> None:
         self.settings.setValue("darkTheme", enabled)
-        if enabled:
-            QApplication.instance().setStyleSheet(
-                "QMainWindow,QWidget { background:#24262b; color:#e7e8ea; }"
-                "QLineEdit,QSpinBox,QComboBox,QTreeView,QListView { background:#30333a; }"
-            )
+        app = QApplication.instance()
+        app.setStyle(QStyleFactory.create("Fusion"))
+        if not enabled:
+            app.setPalette(app.style().standardPalette())
+            return
+        palette = QPalette()
+        for role, colour in ((QPalette.ColorRole.Window, "#2b2d31"),
+                             (QPalette.ColorRole.WindowText, "#e7e8ea"),
+                             (QPalette.ColorRole.Base, "#1f2124"),
+                             (QPalette.ColorRole.AlternateBase, "#2b2d31"),
+                             (QPalette.ColorRole.Text, "#e7e8ea"),
+                             (QPalette.ColorRole.Button, "#33363b"),
+                             (QPalette.ColorRole.ButtonText, "#e7e8ea"),
+                             (QPalette.ColorRole.Highlight, "#1683d8"),
+                             (QPalette.ColorRole.HighlightedText, "#ffffff"),
+                             (QPalette.ColorRole.ToolTipBase, "#33363b"),
+                             (QPalette.ColorRole.ToolTipText, "#e7e8ea")):
+            palette.setColor(role, QColor(colour))
+        app.setPalette(palette)
+
+    # -- tools ------------------------------------------------------------------------
+    def set_tool(self, kind: str, style: Style | None = None) -> None:
+        if style is not None:
+            self.tool_styles[kind] = style
+        self.tool = kind
+        action = self.tool_actions.get(kind)
+        if action is not None:
+            action.setChecked(True)
+        view = self.view()
+        if view is not None:
+            view.canvas.set_tool(kind)
+            view.canvas.setFocus()
+        self._show_properties()
+        self._update_status()
+        hints = {
+            "select": "Click a markup to select · drag to move · drag handles to resize",
+            "pan": "Drag to pan", "text_select": "Drag over text to select it · Ctrl+C copies",
+            "calibrate": "Drag along a known dimension to calibrate the scale",
+            "crop": "Drag the area to keep", "snapshot": "Drag an area to copy as an image",
+            "zoom_area": "Drag an area to zoom to",
+        }
+        if kind in markups.CLICK_POINTS:
+            message = "Click points · double-click, right-click, or Enter to finish · Backspace undoes a point"
+        elif kind in markups.DRAG_LINE:
+            message = "Drag to draw · hold Shift to snap to 45°"
+        elif kind in markups.SINGLE_CLICK:
+            message = "Click to place"
         else:
-            QApplication.instance().setStyleSheet("")
+            message = hints.get(kind, "Drag on the page")
+        self.statusBar().showMessage(f"{tool_label(kind)}: {message} · Esc returns to Select")
 
-    def _close_tab(self, index: int) -> None:
-        widget = self.tabs.widget(index)
-        if isinstance(widget, PdfTab):
-            if not self._confirm_pending_edits(widget):
+    def style_for(self, kind: str) -> Style:
+        if kind not in self.tool_styles:
+            self.tool_styles[kind] = default_style(kind)
+        return self.tool_styles[kind]
+
+    def _tool_preset_chosen(self, preset: ToolPreset) -> None:
+        self.set_tool(preset.kind, preset.make_style())
+        self.statusBar().showMessage(f"Tool Chest: {preset.name}", 3000)
+
+    def _save_tool(self) -> None:
+        view = self.view()
+        selection = self._selection()
+        if selection and view:
+            page, xref = selection[0]
+            pdf_page = view.session.doc[page]
+            kind = markups.markup_kind(pdf_page, pdf_page.load_annot(xref))
+            style = markups.read_style(pdf_page, xref)
+        elif self.tool in KIND_LABELS:
+            kind, style = self.tool, self.style_for(self.tool)
+        else:
+            return
+        user_sets = [name for name in self.chest.user if name != "Recent Tools"]
+        set_name, accepted = QInputDialog.getItem(self, "Add to Tool Chest", "Tool set:",
+                                                  user_sets, max(0, user_sets.index(MY_TOOLS))
+                                                  if MY_TOOLS in user_sets else 0, True)
+        if not accepted or not set_name.strip():
+            return
+        name, accepted = QInputDialog.getText(self, "Add to Tool Chest", "Tool name:",
+                                              text=style.subject or KIND_LABELS.get(kind, kind))
+        if not accepted:
+            return
+        if set_name not in self.chest.user:
+            self.chest.add_set(set_name)
+        self.chest.add(set_name, ToolPreset(name.strip() or KIND_LABELS[kind], kind,
+                                            style.to_dict()))
+        self.tool_chest.refresh()
+        self.chest_dock.raise_()
+
+    def _new_tool_set(self) -> None:
+        name, accepted = QInputDialog.getText(self, "New tool set", "Set name:")
+        if accepted:
+            try:
+                self.chest.add_set(name)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Tool Chest", str(exc))
+            self.tool_chest.refresh()
+
+    def _import_tools(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import tool set", "", "Tool sets (*.json)")
+        if path:
+            try:
+                names = self.chest.import_sets(path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Could not import tools", str(exc))
                 return
-            widget.cleanup()
-        self.tabs.removeTab(index)
-        if widget:
-            widget.deleteLater()
-        if self.tabs.count() == 0:
-            self._show_start_page()
+            self.tool_chest.refresh()
+            self.statusBar().showMessage(f"Imported {', '.join(names)}", 4000)
 
+    def _export_tools(self) -> None:
+        name = self.tool_chest.selected_set()
+        if not name:
+            QMessageBox.information(self, "Export tool set", "Select a tool set first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export tool set", f"{name}.json",
+                                              "Tool sets (*.json)")
+        if path:
+            self.chest.export_set(name, path)
+
+    # -- markup editing ---------------------------------------------------------------
+    def _selection(self) -> list[tuple[int, int]]:
+        view = self.view()
+        return list(view.canvas.selection) if view else []
+
+    def _apply(self, view: DocumentView, label: str, operation):
+        try:
+            return view.session.apply(label, operation)
+        except Exception as exc:
+            QMessageBox.warning(self, label, str(exc))
+            return None
+
+    def _create_markup(self, view: DocumentView, kind: str, page: int, points: list,
+                       text: str) -> None:
+        if kind not in KIND_LABELS:
+            return
+        style = Style.from_dict(self.style_for(kind).to_dict())
+        if kind == "note" and not text:
+            text, accepted = QInputDialog.getMultiLineText(self, "Note", "Note text:")
+            if not accepted:
+                return
+        xref = self._apply(view, f"Add {KIND_LABELS[kind]}", lambda doc: markups.create_markup(
+            doc[page], kind, points, style, text=text, author=self.user_name))
+        if xref is None:
+            return
+        self.chest.note_used(kind, style)
+        self.tool_chest.refresh()
+        if kind in STAY_ACTIVE or self.tool_locked:
+            return
+        self.set_tool("select")
+        view.canvas.set_selection([(page, xref)])
+
+    def _move_markups(self, view: DocumentView, page: int, xrefs: list, dx: float,
+                      dy: float) -> None:
+        def move(doc):
+            for xref in xrefs:
+                markups.move_markup(doc[page], xref, dx, dy)
+        self._apply(view, "Move", move)
+        view.canvas.refresh_overlays()
+
+    def _resize_markup(self, view: DocumentView, page: int, xref: int, rect) -> None:
+        self._apply(view, "Resize", lambda doc: markups.resize_markup(doc[page], xref, rect))
+        view.canvas.refresh_overlays()
+
+    def _reshape_markup(self, view: DocumentView, page: int, xref: int, points: list) -> None:
+        self._apply(view, "Edit Points", lambda doc: markups.set_markup_points(doc[page], xref,
+                                                                                 points))
+        view.canvas.refresh_overlays()
+
+    def _edit_text(self, view: DocumentView, page: int, xref: int) -> None:
+        pdf_page = view.session.doc[page]
+        annot = pdf_page.load_annot(xref)
+        current = annot.info.get("content", "")
+        kind = markups.markup_kind(pdf_page, annot)
+        title = "Edit text" if kind in ("text", "callout", "note") else "Edit comment"
+        text, accepted = QInputDialog.getMultiLineText(self, title, title + ":", current)
+        if accepted and text != current:
+            if kind in ("text", "callout") and not text.strip():
+                QMessageBox.warning(self, title, "Text boxes cannot be empty.")
+                return
+            self._apply(view, "Edit Text", lambda doc: markups.set_text(doc[page], xref, text))
+
+    def _edit_selected_text(self) -> None:
+        view = self.view()
+        selection = self._selection()
+        if view and selection:
+            self._edit_text(view, *selection[0])
+
+    def _delete_markups(self, keys: list) -> None:
+        view = self.view()
+        if not view or not keys:
+            return
+
+        def delete(doc):
+            for page, xref in keys:
+                markups.delete_markup(doc[page], xref)
+        view.canvas.set_selection([])
+        self._apply(view, "Delete", delete)
+
+    def _set_status(self, keys: list, status: str) -> None:
+        view = self.view()
+        if not view or not keys:
+            return
+
+        def apply(doc):
+            for page, xref in keys:
+                markups.set_status(doc[page], xref, status)
+        self._apply(view, "Set Status", apply)
+
+    def _style_edited(self, style: Style) -> None:
+        view = self.view()
+        selection = self._selection()
+        if view and selection:
+            def apply(doc):
+                for page, xref in selection:
+                    pdf_page = doc[page]
+                    current = markups.read_style(pdf_page, xref)
+                    kind = markups.markup_kind(pdf_page, pdf_page.load_annot(xref))
+                    if len(selection) > 1:
+                        # Multi-select changes colours/lines but keeps each one's own text.
+                        style.font_size, style.subject = current.font_size, current.subject
+                    if kind in ("text", "callout"):
+                        style.stroke = style.text_color
+                    markups.apply_style(pdf_page, xref, style)
+            self._apply(view, "Change Properties", apply)
+            view.canvas.refresh_overlays()
+        elif self.tool in KIND_LABELS:
+            self.tool_styles[self.tool] = style
+
+    def _comment_edited(self, text: str) -> None:
+        view = self.view()
+        selection = self._selection()
+        if not view or len(selection) != 1:
+            return
+        page, xref = selection[0]
+        pdf_page = view.session.doc[page]
+        annot = pdf_page.load_annot(xref)
+        if annot is None or annot.info.get("content", "") == text:
+            return
+        kind = markups.markup_kind(pdf_page, annot)
+        if kind in ("text", "callout") and not text.strip():
+            return
+        self._apply(view, "Edit Comment", lambda doc: markups.set_text(doc[page], xref, text))
+
+    def _canvas_selection(self, view: DocumentView) -> None:
+        if view is not self.view():
+            return
+        self.properties.flush_comment()
+        self.markups_list.select_keys(view.canvas.selection)
+        self._show_properties()
+        self._update_actions()
+
+    def _list_selection(self, keys: list) -> None:
+        view = self.view()
+        if view is None:
+            return
+        view.canvas.set_selection(keys)
+        if keys:
+            page, xref = keys[0]
+            if page != view.canvas.current_page:
+                self._go_to_markup(page, xref)
+
+    def _go_to_markup(self, page: int, xref: int) -> None:
+        view = self.view()
+        if view is None:
+            return
+        try:
+            bounds = markups.markup_bounds(view.session.doc[page], xref)
+        except LookupError:
+            return
+        view.canvas.go_to_page(page, bounds.tl + (bounds.width / 2, bounds.height / 2))
+        view.canvas.set_selection([(page, xref)])
+
+    def _show_properties(self) -> None:
+        view = self.view()
+        selection = self._selection()
+        if view and selection:
+            page, xref = selection[0]
+            pdf_page = view.session.doc[page]
+            try:
+                annot = pdf_page.load_annot(xref)
+                kind = markups.markup_kind(pdf_page, annot)
+                style = markups.read_style(pdf_page, xref)
+            except Exception:
+                self.properties.show_nothing()
+                return
+            result = markups.measurement(pdf_page, xref) if kind in MEASURE_KINDS else None
+            heading = KIND_LABELS.get(kind, kind) if len(selection) == 1 else \
+                f"{len(selection)} markups selected"
+            status = markups._get_string(view.session.doc, xref, markups.STATUS_KEY)
+            self.properties.show_style(kind, style, heading,
+                                       annot.info.get("content", "") if len(selection) == 1
+                                       else None, status, result[1] if result else "")
+        elif self.tool in KIND_LABELS:
+            self.properties.show_style(self.tool, self.style_for(self.tool),
+                                       f"{KIND_LABELS[self.tool]} tool defaults")
+        else:
+            self.properties.show_nothing()
+
+    def copy(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        if view.canvas.tool == "text_select" and view.canvas.selected_text:
+            QGuiApplication.clipboard().setText(view.canvas.selected_text)
+            return
+        if view.canvas.selection:
+            self.clipboard = (view.session, list(view.canvas.selection))
+            self.statusBar().showMessage(f"Copied {len(view.canvas.selection)} markup(s)", 2500)
+        self._update_actions()
+
+    def paste(self) -> None:
+        view = self.view()
+        if view is None or self.clipboard is None:
+            return
+        source, keys = self.clipboard
+        target_page = view.canvas.current_page
+        same_doc = source is view.session
+
+        def paste(doc):
+            created = []
+            for page, xref in keys:
+                src_page = source.doc[page] if not same_doc else doc[page]
+                created.append((target_page, markups.duplicate_markup(
+                    src_page, xref, 12, 12, target=doc[target_page])))
+            return created
+        created = self._apply(view, "Paste", paste)
+        if created:
+            view.canvas.set_selection(created)
+
+    def duplicate(self) -> None:
+        view = self.view()
+        keys = self._selection()
+        if view is None or not keys:
+            return
+
+        def duplicate(doc):
+            return [(page, markups.duplicate_markup(doc[page], xref)) for page, xref in keys]
+        created = self._apply(view, "Duplicate", duplicate)
+        if created:
+            view.canvas.set_selection(created)
+
+    def select_all_on_page(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        self.set_tool("select")
+        page = view.canvas.current_page
+        pdf_page = view.session.doc[page]
+        keys = [(page, annot.xref) for annot in pdf_page.annots() or []
+                if annot.type[0] not in (fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_LINK,
+                                         fitz.PDF_ANNOT_WIDGET)]
+        view.canvas.set_selection(keys)
+
+    def undo(self) -> None:
+        view = self.view()
+        if view and view.session.undo():
+            self.statusBar().showMessage("Undone", 1500)
+
+    def redo(self) -> None:
+        view = self.view()
+        if view and view.session.redo():
+            self.statusBar().showMessage("Redone", 1500)
+
+    def _canvas_menu(self, view: DocumentView, global_pos, page: int, point) -> None:
+        menu = QMenu(self)
+        if view.canvas.selection:
+            menu.addAction(self.edit_text_action)
+            menu.addAction("Properties", lambda: (self.props_dock.show(), self.props_dock.raise_()))
+            menu.addSeparator()
+            menu.addAction(self.copy_action)
+            menu.addAction(self.duplicate_action)
+            menu.addAction(self.delete_action)
+            status = menu.addMenu("Set Status")
+            for name in markups.STATUSES:
+                status.addAction(name or "(clear)",
+                                 lambda s=name: self._set_status(self._selection(), s))
+            menu.addAction("Add to Tool Chest…", self._save_tool)
+        else:
+            menu.addAction(self.paste_action)
+            menu.addAction(self.select_all_action)
+            menu.addSeparator()
+            menu.addAction("Rotate Page Clockwise", lambda: self._rotate_pages(90))
+            menu.addAction("Bookmark This Page…", self.bookmarks._add)
+            menu.addAction("Set Scale…", self._set_scale)
+        menu.exec(global_pos)
+
+    # -- tool results: crop, snapshot, calibrate -------------------------------------
+    def _area_requested(self, view: DocumentView, purpose: str, page: int, rect) -> None:
+        if purpose == "crop":
+            pdf_page = view.session.doc[page]
+            offset = pdf_page.cropbox.tl
+            mediabox_rect = fitz.Rect(rect) + (offset.x, offset.y, offset.x, offset.y)
+            self._apply(view, "Crop", lambda doc: ops.crop_page(doc, page, mediabox_rect))
+            self.set_tool("select")
+        elif purpose == "snapshot":
+            pixmap = view.canvas.render_area(page, rect)
+            QGuiApplication.clipboard().setPixmap(pixmap)
+            self.statusBar().showMessage(
+                f"Snapshot copied to the clipboard ({pixmap.width()}×{pixmap.height()} px)", 4000)
+            self.set_tool("select")
+
+    def _line_requested(self, view: DocumentView, purpose: str, page: int, points: list) -> None:
+        if purpose != "calibrate":
+            return
+        length = abs(fitz.Point(points[1]) - fitz.Point(points[0]))
+        dialog = CalibrateDialog(length, view.session.page_count, self)
+        if dialog.exec():
+            scale = dialog.scale()
+            pages = range(view.session.page_count) if dialog.all_pages.isChecked() else [page]
+            self._apply(view, "Calibrate", lambda doc: [markups.set_page_scale(doc[i], scale)
+                                                       for i in pages])
+            self._update_status()
+        self.set_tool("select")
+
+    def _set_scale(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        page = view.canvas.current_page
+        dialog = ScaleDialog(markups.page_scale(view.session.doc[page]), view.session.page_count,
+                             self)
+        if dialog.exec():
+            try:
+                scale = dialog.scale()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Set scale", str(exc))
+                return
+            pages = range(view.session.page_count) if dialog.apply_to_all() else [page]
+            self._apply(view, "Set Scale", lambda doc: [markups.set_page_scale(doc[i], scale)
+                                                       for i in pages])
+            self._update_status()
+
+    # -- search ------------------------------------------------------------------------------
+    def _focus_search(self) -> None:
+        self.search_dock.show()
+        self.search_dock.raise_()
+        view = self.view()
+        if view and view.canvas.selected_text:
+            self.search.query.setText(view.canvas.selected_text.split("\n")[0][:80])
+        self.search.query.setFocus()
+        self.search.query.selectAll()
+
+    def _search(self, text: str, match_case: bool, whole: bool) -> None:
+        view = self.view()
+        if view is None:
+            return
+        view.search_hits = search_document(view.session.doc, text, match_case, whole)
+        self.search.set_results([(page, context) for page, _r, context in view.search_hits])
+        view.canvas.show_search_hits([(page, rect) for page, rect, _c in view.search_hits],
+                                     0 if view.search_hits else -1)
+        if view.search_hits:
+            self.search.results.blockSignals(True)
+            self.search.results.setCurrentRow(0)
+            self.search.results.blockSignals(False)
+        else:
+            self.statusBar().showMessage("No matches found", 3000)
+
+    def _search_result(self, row: int) -> None:
+        view = self.view()
+        if view and 0 <= row < len(view.search_hits):
+            view.canvas.show_search_hits([(p, r) for p, r, _c in view.search_hits], row)
+
+    def _step_search(self, step: int) -> None:
+        view = self.view()
+        if not view or not view.search_hits:
+            self._focus_search()
+            return
+        row = (self.search.results.currentRow() + step) % len(view.search_hits)
+        self.search.results.setCurrentRow(row)
+
+    # -- pages -------------------------------------------------------------------------------
+    def _target_pages(self) -> list[int]:
+        view = self.view()
+        selected = self.thumbnails.selected_pages() if self.thumb_dock.isVisible() else []
+        if view and len(selected) > 1:
+            return selected
+        return [view.canvas.current_page] if view else []
+
+    def _rotate_pages(self, degrees: int) -> None:
+        view = self.view()
+        pages = self._target_pages()
+        if view and pages:
+            self._apply(view, "Rotate", lambda doc: [ops.rotate_page(doc, i, degrees)
+                                                    for i in pages])
+
+    def _delete_pages(self) -> None:
+        view = self.view()
+        pages = self._target_pages()
+        if not view or not pages:
+            return
+        listed = ", ".join(str(p + 1) for p in pages)
+        if QMessageBox.question(self, "Delete pages", f"Delete page(s) {listed}?") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        self._apply(view, "Delete Pages", lambda doc: ops.delete_pages(doc, pages))
+
+    def _insert_blank(self) -> None:
+        view = self.view()
+        if view:
+            after = view.canvas.current_page + 1
+            try:
+                view.session.apply_copy("Insert Blank Page",
+                                        lambda doc: ops.insert_blank_page(doc, after))
+            except Exception as exc:
+                QMessageBox.warning(self, "Insert blank page", str(exc))
+                return
+            view.canvas.go_to_page(after)
+
+    def _insert_pages(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        source, _ = QFileDialog.getOpenFileName(self, "Insert pages from PDF", self._last_dir(),
+                                                "PDF files (*.pdf)")
+        if not source:
+            return
+        count = view.session.page_count
+        before, accepted = QInputDialog.getInt(
+            self, "Insert pages", f"Insert before page (1–{count + 1}):",
+            view.canvas.current_page + 2, 1, count + 1)
+        if not accepted:
+            return
+        try:
+            view.session.apply_copy("Insert Pages",
+                                    lambda doc: ops.insert_pages(doc, source, before - 1))
+        except PermissionError:
+            password, ok = QInputDialog.getText(self, "Password required",
+                                                f"Password for {Path(source).name}:",
+                                                QLineEdit.EchoMode.Password)
+            if ok:
+                try:
+                    view.session.apply_copy("Insert Pages", lambda doc: ops.insert_pages(
+                        doc, source, before - 1, password))
+                except Exception as exc:
+                    QMessageBox.warning(self, "Insert pages", str(exc))
+        except Exception as exc:
+            QMessageBox.warning(self, "Insert pages", str(exc))
+
+    def _replace_page(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        source, _ = QFileDialog.getOpenFileName(self, "Replacement page", self._last_dir(),
+                                                "PDF files (*.pdf)")
+        if not source:
+            return
+        page_number, accepted = QInputDialog.getInt(self, "Replace page",
+                                                    "Use page number from that PDF:", 1, 1, 99999)
+        if not accepted:
+            return
+        current = view.canvas.current_page
+        try:
+            view.session.apply_copy("Replace Page", lambda doc: ops.replace_page(
+                doc, current, source, page_number - 1))
+        except Exception as exc:
+            QMessageBox.warning(self, "Replace page", str(exc))
+
+    def _extract_pages(self) -> None:
+        view = self.view()
+        pages = self._target_pages()
+        if not view or not pages:
+            return
+        text, accepted = QInputDialog.getText(
+            self, "Extract pages", "Pages to extract (e.g. 1-3, 5):",
+            text=", ".join(str(p + 1) for p in pages))
+        if not accepted:
+            return
+        try:
+            indices = parse_page_ranges(text, view.session.page_count)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Extract pages", str(exc))
+            return
+        stem = view.session.path.stem
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Save extracted pages", str(view.session.path.with_name(f"{stem}_extract.pdf")),
+            "PDF files (*.pdf)")
+        if not output:
+            return
+        try:
+            ops.extract_pages(view.session.doc, indices, output,
+                              view.session.password, view.session.path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Extract pages", str(exc))
+            return
+        self.open_file(output)
+
+    def _reorder_dialog(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        count = view.session.page_count
+        text, accepted = QInputDialog.getText(
+            self, "Reorder pages",
+            f"New order of all {count} pages (ranges allowed, e.g. 3, 1-2, 4-{count}):\n"
+            "Tip: you can also drag thumbnails.")
+        if not accepted:
+            return
+        try:
+            order = parse_page_ranges(text, count)
+            self._apply(view, "Reorder Pages", lambda doc: ops.reorder_pages(doc, order))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Reorder pages", str(exc))
+
+    def _reorder_from_thumbnails(self, order: list[int]) -> None:
+        view = self.view()
+        if view:
+            self._apply(view, "Reorder Pages", lambda doc: ops.reorder_pages(doc, order))
+            self._refresh_thumbnails()
+
+    def _thumbnail_menu(self, global_pos, pages: list[int]) -> None:
+        if not pages:
+            return
+        view = self.view()
+        menu = QMenu(self)
+        menu.addAction("Rotate Clockwise", lambda: self._rotate_pages(90))
+        menu.addAction("Rotate Counterclockwise", lambda: self._rotate_pages(270))
+        menu.addAction("Extract…", self._extract_pages)
+        menu.addAction("Insert Blank Page After", self._insert_blank)
+        menu.addAction("Reset Crop", self._reset_crop)
+        menu.addSeparator()
+        menu.addAction("Delete…", self._delete_pages)
+        if view and len(pages) == 1:
+            view.canvas.go_to_page(pages[0])
+        menu.exec(global_pos)
+
+    def _reset_crop(self) -> None:
+        view = self.view()
+        pages = self._target_pages()
+        if view and pages:
+            self._apply(view, "Reset Crop", lambda doc: [ops.reset_crop(doc, i) for i in pages])
+
+    def _split(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Folder for the one-page PDFs",
+                                                  str(view.session.path.parent))
+        if folder:
+            try:
+                written = ops.split_pdf(view.session.doc, folder, view.session.path.stem,
+                                        view.session.password)
+            except Exception as exc:
+                QMessageBox.warning(self, "Split PDF", str(exc))
+                return
+            self.statusBar().showMessage(f"Wrote {len(written)} PDFs to {folder}", 5000)
+
+    def _merge(self) -> None:
+        sources, _ = QFileDialog.getOpenFileNames(self, "Choose PDFs to merge (in order)",
+                                                  self._last_dir(), "PDF files (*.pdf)")
+        if len(sources) < 2:
+            if sources:
+                QMessageBox.information(self, "Merge PDFs", "Choose at least two PDFs.")
+            return
+        output, _ = QFileDialog.getSaveFileName(self, "Save merged PDF", "", "PDF files (*.pdf)")
+        if not output:
+            return
+        try:
+            ops.merge_pdfs(sources, output)
+        except Exception as exc:
+            QMessageBox.warning(self, "Merge PDFs", str(exc))
+            return
+        self.open_file(output)
+
+    def _set_toc(self, toc: list) -> None:
+        view = self.view()
+        if view:
+            # set_toc manages journal operations itself, so it cannot run inside
+            # one; apply it to a document copy instead (still undoable).
+            try:
+                view.session.apply_copy("Edit Bookmarks", lambda doc: doc.set_toc(toc))
+            except Exception as exc:
+                QMessageBox.warning(self, "Edit bookmarks", str(exc))
+
+    def _toggle_layer(self, number: int, visible: bool) -> None:
+        view = self.view()
+        if view is None:
+            return
+        # Layer visibility is a view setting, so it is not an undo step.
+        view.session.doc.set_layer_ui_config(number, 0 if visible else 2)
+        for item in view.canvas.pages:
+            item.stale = True
+        view.canvas.schedule_render()
+
+    # -- tools menu ----------------------------------------------------------------------
+    def _fill_form(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        fields = ops.read_form_fields(view.session.doc)
+        if not fields:
+            QMessageBox.information(self, "Fill form", "This PDF has no fillable form fields.")
+            return
+        dialog = FormDialog(fields, self)
+        if dialog.exec():
+            values = dialog.values()
+            if values:
+                self._apply(view, "Fill Form", lambda doc: ops.fill_form_fields(doc, values))
+
+    def _edit_existing_text(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        page = view.canvas.current_page
+        old, accepted = QInputDialog.getText(self, "Edit existing text",
+                                             "Exact text to find on the current page:",
+                                             text=view.canvas.selected_text.split("\n")[0])
+        if not accepted or not old:
+            return
+        new, accepted = QInputDialog.getText(self, "Edit existing text",
+                                             "Replacement text (empty removes it):")
+        if accepted:
+            count = self._apply(view, "Edit Text", lambda doc: ops.replace_existing_text(
+                doc, page, old, new))
+            if count:
+                self.statusBar().showMessage(f"Replaced {count} occurrence(s)", 4000)
+
+    def _export_text(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        output, _ = QFileDialog.getSaveFileName(self, "Export text",
+                                                str(view.session.path.with_suffix(".txt")),
+                                                "Text files (*.txt)")
+        if output:
+            ops.export_text(view.session.doc, output)
+            self.statusBar().showMessage(f"Exported text to {output}", 4000)
+
+    def _export_markups(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Export Markups List", str(view.session.path.with_name(
+                view.session.path.stem + "_markups.csv")), "CSV files (*.csv)")
+        if output:
+            markups.export_markups_csv(markups.list_markups(view.session.doc), output)
+            self.statusBar().showMessage(f"Exported markups to {output}", 4000)
+
+    def _protect_copy(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        password, accepted = QInputDialog.getText(self, "Password-protect a copy",
+                                                  "Password for the copy:",
+                                                  QLineEdit.EchoMode.Password)
+        if not accepted:
+            return
+        confirm, accepted = QInputDialog.getText(self, "Password-protect a copy",
+                                                 "Enter the password again:",
+                                                 QLineEdit.EchoMode.Password)
+        if not accepted:
+            return
+        if password != confirm:
+            QMessageBox.warning(self, "Password-protect a copy", "The passwords do not match.")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Save protected copy", str(view.session.path.with_name(
+                view.session.path.stem + "_protected.pdf")), "PDF files (*.pdf)")
+        if output:
+            try:
+                ops.protect_pdf(view.session.pdf_bytes(encrypt=False), output, password,
+                                view.session.path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Password-protect a copy", str(exc))
+                return
+            self.statusBar().showMessage(f"Saved AES-256 protected copy: {output}", 5000)
+
+    def _flatten(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        if QMessageBox.question(self, "Flatten markups",
+                                "Burn every markup into the page so it can no longer be "
+                                "edited? You can undo this until you close the file.") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        view.canvas.set_selection([])
+        self._apply(view, "Flatten Markups", ops.flatten_markups)
+
+    def _apply_redactions(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        pending = sum(1 for row in markups.list_markups(view.session.doc) if row["kind"] == "redact")
+        if not pending:
+            QMessageBox.information(self, "Apply redactions",
+                                    "Mark areas with the Redact tool first.")
+            return
+        if QMessageBox.warning(
+                self, "Apply redactions",
+                f"Permanently remove all text, images, and graphics under {pending} redaction "
+                "mark(s)? After saving, the removed content cannot be recovered.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel) != \
+                QMessageBox.StandardButton.Yes:
+            return
+        view.canvas.set_selection([])
+        pages = self._apply(view, "Apply Redactions", ops.apply_redactions)
+        if pages:
+            self.statusBar().showMessage(f"Redacted content on {pages} page(s)", 5000)
+
+    def _choose_other_pdf(self, title: str) -> fitz.Document | None:
+        path, _ = QFileDialog.getOpenFileName(self, title, self._last_dir(), "PDF files (*.pdf)")
+        if not path:
+            return None
+        password = None
+        while True:
+            try:
+                return ops.open_pdf(path, password)
+            except PermissionError:
+                password, ok = QInputDialog.getText(self, "Password required",
+                                                    f"Password for {Path(path).name}:",
+                                                    QLineEdit.EchoMode.Password)
+                if not ok:
+                    return None
+            except Exception as exc:
+                QMessageBox.warning(self, title, str(exc))
+                return None
+
+    def _compare_documents(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        old = self._choose_other_pdf("Choose the OLDER revision to compare against")
+        if old is None:
+            return
+        try:
+            pages = min(old.page_count, view.session.page_count)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                found = {i: compare.difference_regions(old[i], view.session.doc[i])
+                         for i in range(pages)}
+            finally:
+                QApplication.restoreOverrideCursor()
+            total = sum(len(regions) for regions in found.values())
+            if not total:
+                QMessageBox.information(self, "Compare documents",
+                                        f"No visible differences found on {pages} page(s).")
+                return
+            style = default_style("cloud")
+            style.subject = "Compare: changed"
+            style.stroke = "#e02020"
+
+            def add(doc):
+                for index, regions in found.items():
+                    for rect in regions:
+                        markups.create_markup(doc[index], "cloud",
+                                              [rect.tl, rect.tr, rect.br, rect.bl], style,
+                                              author=self.user_name)
+            self._apply(view, "Compare Documents", add)
+            self.markups_dock.show()
+            self.statusBar().showMessage(
+                f"Added {total} change cloud(s) on {sum(1 for r in found.values() if r)} page(s)",
+                6000)
+        finally:
+            old.close()
+
+    def _overlay_pages(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        old = self._choose_other_pdf("Choose the OLDER revision to overlay")
+        if old is None:
+            return
+        try:
+            pages = min(old.page_count, view.session.page_count)
+            data = compare.overlay_pdf([(old[i], view.session.doc[i]) for i in range(pages)])
+        finally:
+            old.close()
+        handle, name = tempfile.mkstemp(prefix=f"overlay-{view.session.path.stem}-",
+                                        suffix=".pdf")
+        os.close(handle)
+        path = Path(name)
+        path.write_bytes(data)
+        self._temp_files.append(path.resolve())
+        self.open_file(str(path), f"Overlay: {view.session.path.name}")
+        self.statusBar().showMessage("Overlay: red = only in older, cyan = only in newer, "
+                                     "black = unchanged", 8000)
+
+    # -- misc ------------------------------------------------------------------------------
+    def _preferences(self) -> None:
+        name, accepted = QInputDialog.getText(self, "Preferences",
+                                              "Your name (shown as markup author):",
+                                              text=self.user_name)
+        if accepted and name.strip():
+            self.user_name = name.strip()
+            self.settings.setValue("userName", self.user_name)
+
+    def _show_shortcuts(self) -> None:
+        lines = [f"{tool_label(kind)}: {key}" for kind, key in SHORTCUTS.items()]
+        lines += ["", "Esc: back to Select / cancel", "Space+drag or middle-drag: pan",
+                  "Wheel: zoom · Shift+wheel: scroll sideways · Ctrl+wheel: scroll",
+                  "Shift while drawing: snap to 45°", "Enter / double-click: finish polygon",
+                  "Arrow keys: nudge selected markups (Shift = 10 pt)",
+                  "Delete: delete selected markups", "Ctrl+D: duplicate", "F2: edit text"]
+        QMessageBox.information(self, "Keyboard shortcuts", "\n".join(lines))
+
+    def _about(self) -> None:
+        QMessageBox.about(self, f"About {APP_NAME}", (
+            f"<b>{APP_NAME} {APP_VERSION}</b><br>Offline PDF markup, measurement, and review."
+            "<br><br>Built with PySide6 (Qt, LGPLv3) and PyMuPDF (AGPL-3.0-or-later)."
+            " Because PyMuPDF is AGPL-licensed, copies of this program must be shared with"
+            " their complete source code."))
+
+
+def parse_page_ranges(text: str, count: int) -> list[int]:
+    """'1-3, 5' -> [0, 1, 2, 4] (zero-based, order kept, 1 <= n <= count)."""
+    pages = []
+    for part in text.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, _sep, end = part.partition("-")
+            first, last = int(start), int(end)
+            step = 1 if last >= first else -1
+            pages.extend(range(first, last + step, step))
+        else:
+            pages.append(int(part))
+    if not pages:
+        raise ValueError("Enter at least one page number.")
+    if any(page < 1 or page > count for page in pages):
+        raise ValueError(f"Page numbers must be between 1 and {count}.")
+    return [page - 1 for page in pages]
+
+
+# -- self-test ----------------------------------------------------------------------
 
 def _report_self_test(checks: list[tuple[str, bool]]) -> int:
     """Print self-test results and copy them to NORTHSTAR_SELF_TEST_REPORT if set.
@@ -1820,191 +1723,162 @@ def _report_self_test(checks: list[tuple[str, bool]]) -> int:
 
 
 def self_test() -> int:
-    """Small executable smoke check used by the Windows build workflow."""
-    from tempfile import NamedTemporaryFile
-    from pypdf import PdfWriter
+    """Drive the real window with simulated mouse input; used by the build workflow."""
+    from PySide6.QtTest import QTest
 
     app = QApplication.instance() or QApplication([])
-    with NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        f.write(b"this is not a valid PDF")
-        malformed_path = f.name
-    with NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        valid_path = f.name
-    writer = PdfWriter()
-    for _ in range(4):
-        writer.add_blank_page(width=612, height=792)
-    with open(valid_path, "wb") as stream:
-        writer.write(stream)
+    app.setOrganizationName("Northstar")
+    app.setApplicationName("NorthstarPDF-SelfTest")
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      tempfile.mkdtemp(prefix="northstar-settings-"))
+    workdir = Path(tempfile.mkdtemp(prefix="northstar-self-test-"))
+    source = workdir / "plan.pdf"
+    doc = fitz.open()
+    for number in range(3):
+        page = doc.new_page(width=792, height=612)
+        page.insert_text((72, 90), f"Sheet A-10{number} Floor plan", fontsize=16)
+        page.draw_rect(fitz.Rect(100, 150, 500, 450), color=(0, 0, 0), width=2)
+    doc.save(source)
+    doc.close()
+    checks: list[tuple[str, bool]] = []
+    window = MainWindow([str(source)])
     try:
-        document = QPdfDocument()
-        result = document.load(malformed_path)
-        malformed_ok = result == QPdfDocument.Error.InvalidFileFormat
-        window = MainWindow([valid_path])
-        window.resize(900, 700)
+        window.resize(1300, 900)
         window.show()
-        app.processEvents()
-        organize_index = next(
-            i for i in range(window.workspace_tabs.count())
-            if window.workspace_tabs.tabText(i) == "Document"
-        )
-        window.workspace_tabs.setCurrentIndex(organize_index)
-        ui_ok = (window.tool_dock.windowTitle() == "Tool Chest · Document"
-                 and window.tool_dock.isFloating() is False)
+        QTest.qWait(150)
+        view = window.view()
+        canvas = view.canvas
+        session = view.session
+        checks.append(("Open document in canvas", view is not None and len(canvas.pages) == 3))
 
-        view = window._active().view
-        nav = view.pageNavigator()
-        previous_zoom = float(nav.currentZoom())
+        def page_to_view(page: int, point) -> QPointF:
+            item = canvas.page_item(page)
+            return QPointF(canvas.mapFromScene(item.pos() + canvas.to_visual(page, point)))
 
-        class FakeWheel:
-            def angleDelta(self):
-                return QPoint(0, 120)
-            def position(self):
-                return QPointF(120, 120)
-            def accept(self):
-                pass
+        def drag(start, end, page: int = 0) -> None:
+            a = page_to_view(page, start).toPoint()
+            b = page_to_view(page, end).toPoint()
+            QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, a)
+            for step in range(1, 6):
+                point = a + (b - a) * step / 5
+                QTest.mouseMove(canvas.viewport(), point)
+            QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, b)
+            QTest.qWait(30)
 
-        view.wheelEvent(FakeWheel())
-        app.processEvents()
-        zoom_ok = float(nav.currentZoom()) > previous_zoom
+        canvas.fit("page")
+        QTest.qWait(60)
+        window.set_tool("rectangle")
+        drag((150, 200), (300, 300))
+        rows = markups.list_markups(session.doc)
+        rect_ok = len(rows) == 1 and rows[0]["kind"] == "rectangle"
+        bounds = markups.markup_bounds(session.doc[0], rows[0]["xref"]) if rows else fitz.Rect()
+        checks.append(("Draw rectangle with the mouse",
+                       rect_ok and abs(bounds.x0 - 150) < 3 and abs(bounds.y1 - 300) < 3))
+        checks.append(("Tool returns to Select and selects the markup",
+                       window.tool == "select" and len(canvas.selection) == 1))
 
-        class FakeMouse:
-            def __init__(self, button, x, y):
-                self._button = button
-                self._point = QPointF(x, y)
-            def button(self):
-                return self._button
-            def position(self):
-                return self._point
-            def accept(self):
-                pass
+        drag((220, 250), (260, 290))
+        moved = markups.markup_bounds(session.doc[0], rows[0]["xref"]) if rows else fitz.Rect()
+        checks.append(("Drag a selected markup to move it",
+                       abs(moved.x0 - 190) < 3 and abs(moved.y0 - 240) < 3))
+        window.undo()
+        restored = markups.markup_bounds(session.doc[0], rows[0]["xref"]) if rows else fitz.Rect()
+        checks.append(("Undo the move", abs(restored.x0 - 150) < 3))
 
-        scrollbar = view.verticalScrollBar()
-        scrollbar.setRange(0, 1000)
-        scrollbar.setValue(400)
-        view.mousePressEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 100))
-        view.mouseMoveEvent(FakeMouse(Qt.MouseButton.NoButton, 100, 120))
-        pan_ok = scrollbar.value() == 380
-        view.mouseReleaseEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 120))
+        style = Style.from_dict(markups.read_style(session.doc[0], rows[0]["xref"]).to_dict())
+        style.stroke = "#00aa00"
+        window._style_edited(style)
+        checks.append(("Change colour from the Properties panel",
+                       markups.read_style(session.doc[0], rows[0]["xref"]).stroke == "#00aa00"))
 
-        view.setPageMode(QPdfView.PageMode.SinglePage)
-        view.setZoomMode(QPdfView.ZoomMode.FitInView)
-        app.processEvents()
-        view.horizontalScrollBar().setRange(0, 0)
-        view.verticalScrollBar().setRange(0, 0)
-        before_fit_pan = view.pageNavigator().currentLocation()
-        view.mousePressEvent(FakeMouse(Qt.MouseButton.MiddleButton, 100, 100))
-        view.mouseMoveEvent(FakeMouse(Qt.MouseButton.NoButton, 150, 150))
-        view.mouseReleaseEvent(FakeMouse(Qt.MouseButton.MiddleButton, 150, 150))
-        after_fit_pan = view.pageNavigator().currentLocation()
-        fit_pan_ok = (abs(after_fit_pan.x() - before_fit_pan.x()) > 0.01
-                      or abs(after_fit_pan.y() - before_fit_pan.y()) > 0.01)
+        window.set_tool("cloud")
+        for point in ((520, 160), (700, 160), (700, 300)):
+            p = page_to_view(0, point).toPoint()
+            QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p)
+        QTest.mouseDClick(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                          page_to_view(0, (520, 300)).toPoint())
+        QTest.qWait(30)
+        kinds = [row["kind"] for row in markups.list_markups(session.doc)]
+        checks.append(("Click points to draw a revision cloud", "cloud" in kinds))
 
-        text_tab = window._active()
-        nav = text_tab.view.pageNavigator()
-        gesture = {
-            "kind": "text", "page": max(0, nav.currentPage()),
-            "start": (100.0, 100.0), "end": (300.0, 185.0),
-            "points": [(100.0, 100.0), (300.0, 185.0)],
-            "location": QPointF(nav.currentLocation()),
-            "zoom": max(float(nav.currentZoom()), 0.1),
-        }
-        window._begin_text_box(text_tab, gesture)
-        preview = window._text_editor
-        preview.text_edit.setPlainText("Visible preview")
-        window.text_bold.setChecked(True)
-        app.processEvents()
-        initial_width = preview.width()
-        preview.resize(initial_width + 24, preview.height() + 16)
-        resize_ok = preview.width() == initial_width + 24
+        canvas.set_selection([])
+        window.set_tool("highlight")
+        drag((68, 70), (330, 98))
+        highlight = [r for r in markups.list_markups(session.doc) if r["kind"] == "highlight"]
+        checks.append(("Highlight snaps to text", bool(highlight)))
 
-        class FakeDrag:
-            def __init__(self, x, y):
-                self._point = QPointF(x, y)
-            def button(self):
-                return Qt.MouseButton.LeftButton
-            def globalPosition(self):
-                return self._point
-            def accept(self):
-                pass
+        window._apply(view, "Scale", lambda d: markups.set_page_scale(
+            d[0], markups.common_scale('1/4" = 1\'-0"')))
+        window.set_tool("length")
+        drag((100, 500), (280, 500))
+        lengths = [r for r in markups.list_markups(session.doc) if r["kind"] == "length"]
+        # 180 pt at 1/4" = 1'-0" is 10 ft (18 pt per foot); allow two screen
+        # pixels for whole-pixel mouse positions.
+        tolerance = 2 / canvas.zoom / 18
+        checks.append(("Scaled length measurement", bool(lengths)
+                       and abs(lengths[0]["value"] - 10) < tolerance
+                       and lengths[0]["measurement"] == markups.format_length(
+                           lengths[0]["value"], "ft-in")))
+        window._refresh_panels()
+        checks.append(("Markups List shows every markup",
+                       window.markups_list.table.rowCount() == len(markups.list_markups(session.doc))))
 
-        before_move = preview.pos()
-        preview.move_handle.mousePressEvent(FakeDrag(10, 10))
-        preview.move_handle.mouseMoveEvent(FakeDrag(34, 28))
-        preview.move_handle.mouseReleaseEvent(FakeDrag(34, 28))
-        move_ok = preview.pos() != before_move and preview.text_edit.toPlainText() == "Visible preview"
-        preview.text_edit.moveCursor(QTextCursor.MoveOperation.End)
-        preview.text_edit.keyPressEvent(QKeyEvent(
-            QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
-            Qt.KeyboardModifier.ControlModifier,
-        ))
-        newline_ok = preview.text_edit.toPlainText() == "Visible preview\n"
-        preview.text_edit.insertPlainText("second line")
-        preview_ok = (newline_ok and move_ok and window.text_toolbar.isEnabled()
-                      and preview.isVisible() and preview.move_handle.isVisible())
-        # Plain Enter places the text; Ctrl+Enter above inserted a line break.
-        preview.text_edit.keyPressEvent(QKeyEvent(
-            QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
-            Qt.KeyboardModifier.NoModifier,
-        ))
-        app.processEvents()
-        state_index = text_tab.edit_session.cursor
-        record = text_tab.edit_session.operations[state_index]
-        original_rect = tuple(record[1][1])
-        nav = text_tab.view.pageNavigator()
-        view_location = QPointF(nav.currentLocation())
-        view_zoom = max(float(nav.currentZoom()), 0.1)
-        reader_for_move = PdfReader(str(text_tab.edit_session.working_path), strict=False)
-        page_box_for_move = reader_for_move.pages[gesture["page"]].mediabox
-        box_screen = window._pdf_rect_to_view(
-            text_tab, gesture["page"], original_rect, view_location, view_zoom,
-            page_box_for_move,
-        )
-        press = (float(box_screen.left() + 8), float(box_screen.top() + 8))
-        drag = (press[0] + 18, press[1] + 12)
-        window._handle_selection_gesture(text_tab, {
-            "page": gesture["page"], "start": press, "end": drag,
-            "location": view_location, "zoom": view_zoom,
-        })
-        moved_record = text_tab.edit_session.operations[state_index]
-        move_ok = tuple(moved_record[1][1]) != original_rect
-        placed_reader = PdfReader(str(text_tab.edit_session.working_path), strict=False)
-        extracted = placed_reader.pages[gesture["page"]].extract_text() or ""
-        placed_text = ("Visible preview" in extracted and "second line" in extracted
-                       and move_ok)
-        text_tab.view.set_annotation_tool("text")
-        window._escape_to_pointer()
-        escape_ok = text_tab.view.annotation_tool == "select"
-        text_box_ok = preview_ok and resize_ok and placed_text and escape_ok
-        text_tab.discard_edits()
-        window.close()
+        window.search.query.setText("Floor plan")
+        window._search("Floor plan", False, False)
+        checks.append(("Search all pages", len(view.search_hits) == 3))
 
-        checks = [
-            ("PDFium malformed-file smoke test", malformed_ok),
-            ("Task workspaces and movable tools panel", ui_ok),
-            ("Scroll-wheel zoom", zoom_ok),
-            ("Middle-button drag pan", pan_ok),
-            ("Panning with fit-to-page scrollbars disabled", fit_pan_ok),
-            ("Select moves text; Enter/Ctrl+Enter/Escape controls", text_box_ok),
-        ]
-        return _report_self_test(checks)
+        window._apply(view, "Rotate", lambda d: ops.rotate_page(d, 1))
+        QTest.qWait(60)
+        window.set_tool("ellipse")
+        canvas.go_to_page(1)
+        QTest.qWait(60)
+        drag((150, 200), (250, 260), page=1)
+        ellipses = [r for r in markups.list_markups(session.doc) if r["kind"] == "ellipse"]
+        e_bounds = markups.markup_bounds(session.doc[1], ellipses[0]["xref"]) if ellipses \
+            else fitz.Rect()
+        checks.append(("Draw on a rotated page in the right place",
+                       bool(ellipses) and abs(e_bounds.x0 - 150) < 3 and abs(e_bounds.y0 - 200) < 3))
+
+        saved = window._save_view(view)
+        with fitz.open(source) as reopened:
+            persisted = sum(1 for page in reopened for _a in page.annots())
+        checks.append(("Save keeps live markups", saved and persisted == len(
+            markups.list_markups(session.doc))))
+        canvas.zoom_by(2.0)
+        QTest.qWait(80)
+        canvas._render_visible()
+        checks.append(("Sharp render at high zoom", any(item.detail is not None or
+                                                        item.base_scale >= canvas.zoom * 0.99
+                                                        for item in canvas.pages if item.base)))
+    except Exception as exc:  # report rather than crash so CI shows which step broke
+        import traceback
+        traceback.print_exc()
+        checks.append((f"Self-test raised {type(exc).__name__}: {exc}", False))
     finally:
-        document.close()
-        os.unlink(malformed_path)
-        os.unlink(valid_path)
-        app.quit()
+        for open_view in window.views():
+            open_view.session.close()
+        window.tabs.clear()
+        window.close()
+        app.processEvents()
+    return _report_self_test(checks)
 
 
 def main() -> int:
     if "--self-test" in sys.argv:
         return self_test()
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
     app.setOrganizationName("Northstar")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationName("NorthstarPDF")
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     files = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
     window = MainWindow(files)
     window.show()
     return app.exec()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
