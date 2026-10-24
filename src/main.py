@@ -214,6 +214,7 @@ class MainWindow(QMainWindow):
         self.properties.statusEdited.connect(
             lambda status: self._set_status(self._selection(), status))
         self.properties.saveToolRequested.connect(self._save_tool)
+        self.properties.replyRequested.connect(self._reply)
         self.tool_chest.toolChosen.connect(self._tool_preset_chosen)
         self.tool_chest.new_set.clicked.connect(self._new_tool_set)
         self.tool_chest.import_button.clicked.connect(self._import_tools)
@@ -1128,6 +1129,17 @@ class MainWindow(QMainWindow):
                 return
             self._apply(view, "Edit Text", lambda doc: markups.set_text(doc[page], xref, text))
 
+    def _reply(self) -> None:
+        view = self.view()
+        selection = self._selection()
+        if view is None or len(selection) != 1:
+            return
+        page, xref = selection[0]
+        text, accepted = QInputDialog.getMultiLineText(self, "Reply", "Your reply:")
+        if accepted and text.strip():
+            self._apply(view, "Reply", lambda doc: markups.add_reply(doc[page], xref, text,
+                                                                     self.user_name))
+
     def _edit_selected_text(self) -> None:
         view = self.view()
         selection = self._selection()
@@ -1239,6 +1251,8 @@ class MainWindow(QMainWindow):
             self.properties.show_style(kind, style, heading,
                                        annot.info.get("content", "") if len(selection) == 1
                                        else None, status, result[1] if result else "")
+            self.properties.set_replies(markups.replies(pdf_page, xref)
+                                        if len(selection) == 1 else None)
         elif self.tool in KIND_LABELS:
             self.properties.show_style(self.tool, self.style_for(self.tool),
                                        f"{KIND_LABELS[self.tool]} tool defaults")
@@ -1297,7 +1311,7 @@ class MainWindow(QMainWindow):
         pdf_page = view.session.doc[page]
         keys = [(page, annot.xref) for annot in pdf_page.annots() or []
                 if annot.type[0] not in (fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_LINK,
-                                         fitz.PDF_ANNOT_WIDGET)]
+                                         fitz.PDF_ANNOT_WIDGET) and not annot.irt_xref]
         view.canvas.set_selection(keys)
 
     def undo(self) -> None:

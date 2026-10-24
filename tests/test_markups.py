@@ -285,3 +285,28 @@ def test_volume_and_image_stamps(session: PdfSession, tmp_path: Path) -> None:
     assert sum(1 for i in range(0, len(samples), 3) if samples[i] > 150 and samples[i + 1] < 60) > 1000
     with pytest.raises(ValueError):
         create_markup(session.doc[0], "image", [(10, 10)], default_style("image"))
+
+
+def test_reply_threads(session: PdfSession, tmp_path: Path) -> None:
+    import report
+
+    xref = session.apply("Cloud", lambda doc: create_markup(
+        doc[0], "cloud", [(100, 100), (200, 100), (150, 180)], author="Pat", text=""))
+    session.apply("Reply 1", lambda doc: markups.add_reply(doc[0], xref, "Is this the new wall?", "Sam"))
+    session.apply("Reply 2", lambda doc: markups.add_reply(doc[0], xref, "Yes, per RFI 12", "Pat"))
+    page = session.doc[0]
+    thread = markups.replies(page, xref)
+    assert [(r["author"], r["text"]) for r in thread] == [
+        ("Sam", "Is this the new wall?"), ("Pat", "Yes, per RFI 12")]
+    assert all(r["date"] for r in thread)
+    rows = markups.list_markups(session.doc)
+    assert len(rows) == 1 and rows[0]["replies"] == 2  # replies are not separate rows
+    assert markups.markup_at(page, (150, 105)) == xref
+    output = report.write_summary(session.doc, tmp_path / "s.pdf", "t", rows)
+    with fitz.open(output) as result:
+        assert "Yes, per RFI 12" in "".join(p.get_text() for p in result)
+    session.apply("Delete", lambda doc: markups.delete_markup(doc[0], xref))
+    assert not list(session.doc[0].annots())  # replies go with their markup
+    line = session.apply("Line", lambda doc: create_markup(doc[1], "line", [(1, 1), (50, 50)]))
+    with pytest.raises(ValueError):
+        session.apply("Empty reply", lambda doc: markups.add_reply(doc[1], line, "  "))

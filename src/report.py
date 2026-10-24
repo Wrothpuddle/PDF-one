@@ -28,7 +28,8 @@ def _cell(value) -> str:
     return html.escape(str(value or "")).replace("\n", "<br/>")
 
 
-def build_html(title: str, rows: list[dict]) -> str:
+def build_html(title: str, rows: list[dict],
+               threads: dict[tuple[int, int], list[dict]] | None = None) -> str:
     by_type: dict[str, int] = {}
     by_status: dict[str, int] = {}
     for row in rows:
@@ -60,7 +61,11 @@ def build_html(title: str, rows: list[dict]) -> str:
     for row in sorted(rows, key=lambda r: (r["page"], r["type"])):
         parts.append(
             f"<tr><td class='num'>{row['page'] + 1}</td><td>{_cell(row['type'])}</td>"
-            f"<td>{_cell(row['subject'])}</td><td>{_cell(row['comment'])}</td>"
+            f"<td>{_cell(row['subject'])}</td><td>{_cell(row['comment'])}"
+            + "".join(f"<br/><i>&#8627; {_cell(reply['author'] or 'Reply')}: "
+                      f"{_cell(reply['text'])}</i>"
+                      for reply in (threads or {}).get((row["page"], row["xref"]), []))
+            + "</td>"
             f"<td>{_cell(row['author'])}</td><td>{_cell(row['date'])}</td>"
             f"<td>{_cell(row['status'])}</td><td>{_cell(row['measurement'])}</td></tr>")
     parts.append("</table>")
@@ -71,8 +76,10 @@ def write_summary(doc: fitz.Document, output: str | Path, title: str,
                   rows: list[dict] | None = None) -> Path:
     """Write the report as a landscape Letter PDF."""
     rows = markups.list_markups(doc) if rows is None else rows
+    threads = {(row["page"], row["xref"]): markups.replies(doc[row["page"]], row["xref"])
+               for row in rows if row.get("replies")}
     output = Path(output)
-    story = fitz.Story(html=build_html(title, rows), user_css=CSS)
+    story = fitz.Story(html=build_html(title, rows, threads), user_css=CSS)
     page_rect = fitz.paper_rect("letter-l")
     content = page_rect + (36, 36, -36, -40)
     writer = fitz.DocumentWriter(str(output))

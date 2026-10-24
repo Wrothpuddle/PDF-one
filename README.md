@@ -15,7 +15,7 @@ Every markup is a real PDF annotation. It stays selectable and editable after sa
 Shows the selected markup, or the active tool's defaults when nothing is selected. You can change the subject, line colour, fill, line width, opacity, line style (solid, dashed, or dotted), line ends, font (Helvetica, Courier, or Times), bold, italic, underline, font size, text colour (separate from the border colour), alignment, stamp, status, and comment. Changes apply to every selected markup and can be undone.
 
 ### Markups List
-A table of every markup in the document showing page, type, subject, comment, author, date, status, colour, and measurement. You can filter by text, type, or status, sort by any column, set the status (Accepted, Rejected, Completed, …), delete markups, and export the list to CSV. Clicking a row jumps to that markup. A totals line adds up measurements by subject (for example, total flooring area or the number of outlets counted).
+A table of every markup in the document showing page, type, subject, comment, author, date, status, colour, and measurement. You can filter by text, type, or status, sort by any column, set the status (Accepted, Rejected, Completed, …), delete markups, and export the list to CSV. Clicking a row jumps to that markup. Each markup can have a reply thread (Properties → Reply), stored as standard PDF replies so Acrobat and Bluebeam show it too. A totals line adds up measurements by subject (for example, total flooring area or the number of outlets counted).
 
 ### Tool Chest
 - **Built-in sets:** Markup, Measure, Construction Review (revision and hold clouds, RFI callout, coloured highlighters, area takeoff, count tools), Stamps, and Redaction.

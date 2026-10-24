@@ -775,7 +775,47 @@ def resize_markup(page: fitz.Page, xref: int, new_rect: fitz.Rect) -> None:
 
 
 def delete_markup(page: fitz.Page, xref: int) -> None:
+    """Delete a markup together with its replies."""
+    for reply in replies(page, xref):
+        page.delete_annot(get_annot(page, reply["xref"]))
     page.delete_annot(get_annot(page, xref))
+
+
+# -- replies -------------------------------------------------------------------
+
+def _is_reply(annot: fitz.Annot) -> bool:
+    return bool(annot.irt_xref)
+
+
+def add_reply(page: fitz.Page, xref: int, text: str, author: str = "") -> int:
+    """Add a reply to a markup's comment thread (a hidden /IRT note, as Acrobat uses)."""
+    if not text.strip():
+        raise ValueError("The reply is empty.")
+    parent = get_annot(page, xref)
+    reply = page.add_text_annot(parent.rect.tl, text.strip(), icon="Comment")
+    reply.set_irt_xref(xref)
+    now = fitz.get_pdf_now()
+    reply.set_info(title=author, content=text.strip(), subject="Reply",
+                   creationDate=now, modDate=now)
+    reply.set_flags(fitz.PDF_ANNOT_IS_HIDDEN | fitz.PDF_ANNOT_IS_NO_ZOOM
+                    | fitz.PDF_ANNOT_IS_NO_ROTATE)
+    reply.update()
+    _set_string(page.parent, reply.xref, KIND_KEY, "reply")
+    return reply.xref
+
+
+def replies(page: fitz.Page, xref: int) -> list[dict]:
+    """Replies to a markup, oldest first: {'xref', 'author', 'date', 'text'}."""
+    found = []
+    for annot in page.annots() or []:
+        if annot.irt_xref == xref:
+            info = annot.info
+            found.append({"xref": annot.xref, "author": info.get("title", ""),
+                          "date": _format_date(info.get("creationDate")
+                                               or info.get("modDate", "")),
+                          "raw_date": info.get("creationDate") or info.get("modDate", ""),
+                          "text": info.get("content", "")})
+    return sorted(found, key=lambda item: item["raw_date"])
 
 
 def duplicate_markup(page: fitz.Page, xref: int, dx: float = 12, dy: float = 12,
@@ -842,7 +882,7 @@ def markup_at(page: fitz.Page, point, tolerance: float = 4.0) -> int | None:
     hit = None
     for annot in page.annots() or []:
         annot_type = annot.type[0]
-        if annot_type in _SKIP_TYPES:
+        if annot_type in _SKIP_TYPES or _is_reply(annot):
             continue
         if annot_type in (fitz.PDF_ANNOT_LINE, fitz.PDF_ANNOT_POLY_LINE, fitz.PDF_ANNOT_INK):
             reach = tolerance + float((annot.border or {}).get("width") or 1) / 2
@@ -882,7 +922,8 @@ def markups_in_rect(page: fitz.Page, rect: fitz.Rect) -> list[int]:
     """Markups whose bounds lie entirely inside rect (for box selection)."""
     rect = fitz.Rect(rect).normalize()
     return [annot.xref for annot in page.annots() or []
-            if annot.type[0] not in _SKIP_TYPES and rect.contains(markup_bounds(page, annot.xref))]
+            if annot.type[0] not in _SKIP_TYPES and not _is_reply(annot)
+            and rect.contains(markup_bounds(page, annot.xref))]
 
 
 # -- measurement ------------------------------------------------------------
@@ -1088,8 +1129,13 @@ def list_markups(doc: fitz.Document) -> list[dict]:
     """Rows for the Markups List: one per markup on every page."""
     rows = []
     for page in doc:
-        for annot in page.annots() or []:
-            if annot.type[0] in _SKIP_TYPES:
+        reply_counts: dict[int, int] = {}
+        annots = [annot for annot in page.annots() or [] if annot.type[0] not in _SKIP_TYPES]
+        for annot in annots:
+            if _is_reply(annot):
+                reply_counts[annot.irt_xref] = reply_counts.get(annot.irt_xref, 0) + 1
+        for annot in annots:
+            if _is_reply(annot):
                 continue
             kind = markup_kind(page, annot)
             info = annot.info
@@ -1109,6 +1155,7 @@ def list_markups(doc: fitz.Document) -> list[dict]:
                 "measurement": result[1] if result else "",
                 "value": result[0] if result else None,
                 "unit": page_scale(page).unit if result else "",
+                "replies": reply_counts.get(annot.xref, 0),
             })
     return rows
 

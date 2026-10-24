@@ -68,6 +68,7 @@ class PropertiesPanel(QWidget):
     commentEdited = Signal(str)
     statusEdited = Signal(str)
     saveToolRequested = Signal()
+    replyRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -129,6 +130,12 @@ class PropertiesPanel(QWidget):
         self.status.addItems(STATUSES)
         self.measurement = QLabel("")
         self.measurement.setStyleSheet("font-weight:600; color:#0b3d91;")
+        self.thread = QListWidget()
+        self.thread.setWordWrap(True)
+        self.thread.setMaximumHeight(130)
+        self.reply_button = QPushButton("Reply…")
+        self.reply_button.clicked.connect(self.replyRequested)
+        self.thread_label = QLabel("Replies")
         self.save_tool = QPushButton("Add to Tool Chest…")
         self.save_tool.clicked.connect(self.saveToolRequested)
 
@@ -155,6 +162,9 @@ class PropertiesPanel(QWidget):
         layout.addLayout(form)
         layout.addWidget(QLabel("Comment"))
         layout.addWidget(self.comment)
+        layout.addWidget(self.thread_label)
+        layout.addWidget(self.thread)
+        layout.addWidget(self.reply_button)
         layout.addWidget(self.save_tool)
         layout.addStretch(1)
 
@@ -189,6 +199,7 @@ class PropertiesPanel(QWidget):
             self._row_visible(label, False)
         self.comment.setEnabled(False)
         self.save_tool.setEnabled(False)
+        self.set_replies(None)
         self._loading = False
 
     def show_style(self, kind: str, style: Style, heading: str, comment: str | None = None,
@@ -243,6 +254,18 @@ class PropertiesPanel(QWidget):
         self.save_tool.setEnabled(True)
         self._loading = False
 
+    def set_replies(self, replies: list[dict] | None) -> None:
+        """Show a markup's reply thread; None hides it (tool defaults, multi-select)."""
+        visible = replies is not None
+        for widget in (self.thread_label, self.thread, self.reply_button):
+            widget.setVisible(visible)
+        self.thread.clear()
+        for reply in replies or []:
+            item = QListWidgetItem(f"{reply['author'] or 'Someone'} · {reply['date']}\n"
+                                   f"{reply['text']}")
+            self.thread.addItem(item)
+        self.thread_label.setText(f"Replies ({len(replies)})" if replies else "Replies")
+
     def current_style(self) -> Style:
         return Style(stroke=self.stroke.value(), fill=self.fill.value(),
                      width=self.width.value(), opacity=self.opacity.value() / 100,
@@ -278,7 +301,7 @@ class MarkupsList(QWidget):
     """Table of every markup in the document with filters, status, and CSV export."""
 
     COLUMNS = ["Page", "Type", "Subject", "Comment", "Author", "Date", "Status", "Colour",
-               "Measurement"]
+               "Measurement", "Replies"]
     activated = Signal(int, int)           # page, xref
     selectionChanged = Signal(list)        # [(page, xref)]
     statusRequested = Signal(list, str)    # [(page, xref)], status
@@ -353,7 +376,8 @@ class MarkupsList(QWidget):
         self.table.setRowCount(len(rows))
         for number, row in enumerate(rows):
             values = [row["page"] + 1, row["type"], row["subject"], row["comment"], row["author"],
-                      row["date"], row["status"], row["color"], row["measurement"]]
+                      row["date"], row["status"], row["color"], row["measurement"],
+                      row.get("replies", 0) or ""]
             for column, value in enumerate(values):
                 item = QTableWidgetItem()
                 item.setData(Qt.ItemDataRole.DisplayRole, value)
