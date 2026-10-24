@@ -372,8 +372,16 @@ def add_rich_text_box(source: str | Path, output: str | Path, page_index: int,
 def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
                        kind: str, rect: tuple[float, float, float, float],
                        text: str = "", vertices: list[tuple[float, float]] | None = None,
-                       password: str | None = None, color: str = "ffd54f") -> None:
-    """Add a standard PDF text or drawing annotation as a new revision."""
+                       password: str | None = None, color: str = "2878d0") -> None:
+    """Add a PDF comment plus a visible page-content appearance for Qt PDF viewers.
+
+    pypdf writes the interoperable annotation object. A matching vector/text
+    appearance is also drawn into the page content because Qt's QPdfView does
+    not consistently render annotations without appearance streams.
+    """
+    import math
+    import fitz
+
     _require_new_output(source, output)
     reader = _reader(source, password)
     if not 0 <= page_index < len(reader.pages):
@@ -423,13 +431,9 @@ def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
             ]),
             NameObject("/Contents"): TextStringObject(kind.title()),
         })
-    elif kind == "rectangle":
-        annotation = Rectangle(rect=(x1, y1, x2, y2))
-        annotation[NameObject("/C")] = ArrayObject([
-            FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
-        ])
-    elif kind == "ellipse":
-        annotation = Ellipse(rect=(x1, y1, x2, y2))
+    elif kind in ("rectangle", "ellipse"):
+        annotation = (Rectangle(rect=(x1, y1, x2, y2)) if kind == "rectangle"
+                      else Ellipse(rect=(x1, y1, x2, y2)))
         annotation[NameObject("/C")] = ArrayObject([
             FloatObject(int(color[i:i + 2], 16) / 255) for i in (0, 2, 4)
         ])
@@ -455,4 +459,69 @@ def add_pdf_annotation(source: str | Path, output: str | Path, page_index: int,
 
     writer = PdfWriter(clone_from=reader)
     writer.add_annotation(page_index, annotation)
-    _write(writer, output, password if reader.is_encrypted else None)
+    encrypted = reader.is_encrypted
+    _write(writer, output, password if encrypted else None)
+
+    # Add a visible appearance into page content so annotations display in the
+    # built-in viewer too. Coordinates from PDF use a bottom-left origin;
+    # PyMuPDF page drawing uses a top-left origin, converted with its matrix.
+    doc = fitz.open(str(output))
+    try:
+        if doc.needs_pass and not doc.authenticate(password or ""):
+            raise PermissionError("The PDF is encrypted; a valid password is required.")
+        page = doc[page_index]
+        page_rect = fitz.Rect(x1, y1, x2, y2) * page.transformation_matrix
+        rgb = tuple(int(color[j:j + 2], 16) / 255 for j in (0, 2, 4))
+        if kind == "note":
+            note_rect = page_rect
+            page.draw_rect(note_rect, color=(0.72, 0.52, 0.06),
+                           fill=(1.0, 0.91, 0.55), width=1, overlay=True)
+            note_text = note_rect + (5, 5, -5, -5)
+            page.insert_textbox(note_text, text.strip(), fontsize=10,
+                                fontname="helv", color=(0.12, 0.12, 0.12), overlay=True)
+        elif kind == "highlight":
+            page.draw_rect(page_rect, color=None, fill=(1.0, 0.88, 0.12),
+                           fill_opacity=0.36, overlay=True)
+        elif kind == "underline":
+            y = page_rect.y1 - max(1.5, page_rect.height * 0.08)
+            page.draw_line((page_rect.x0, y), (page_rect.x1, y), color=rgb,
+                           width=1.4, overlay=True)
+        elif kind == "strikeout":
+            y = (page_rect.y0 + page_rect.y1) / 2
+            page.draw_line((page_rect.x0, y), (page_rect.x1, y), color=rgb,
+                           width=1.4, overlay=True)
+        elif kind == "rectangle":
+            page.draw_rect(page_rect, color=rgb, width=1.6, overlay=True)
+        elif kind == "ellipse":
+            page.draw_oval(page_rect, color=rgb, width=1.6, overlay=True)
+        elif kind in ("line", "arrow"):
+            p1 = fitz.Point(x1, y1) * page.transformation_matrix
+            p2 = fitz.Point(x2, y2) * page.transformation_matrix
+            page.draw_line(p1, p2, color=rgb, width=1.6, overlay=True)
+            if kind == "arrow":
+                angle = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                length, spread = 9.0, 0.58
+                left = fitz.Point(p2.x - length * math.cos(angle - spread),
+                                  p2.y - length * math.sin(angle - spread))
+                right = fitz.Point(p2.x - length * math.cos(angle + spread),
+                                   p2.y - length * math.sin(angle + spread))
+                page.draw_polyline([left, p2, right], color=rgb, width=1.6, overlay=True)
+        elif kind == "pen":
+            path_points = vertices or [(x1, y1), (x2, y2)]
+            mapped = [fitz.Point(float(x), float(y)) * page.transformation_matrix
+                      for x, y in path_points]
+            page.draw_polyline(mapped, color=rgb, width=1.8, overlay=True)
+        elif kind == "text":
+            page.draw_rect(page_rect, color=rgb, width=1.2, overlay=True)
+            page.insert_textbox(page_rect + (5, 5, -5, -5), text.strip(),
+                                fontsize=12, fontname="helv", color=(0, 0, 0),
+                                overlay=True)
+        temp = output.with_name(output.stem + ".appearance.tmp.pdf")
+        options = {"garbage": 3, "deflate": True}
+        if encrypted:
+            options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
+                           user_pw=password or "", owner_pw=password or "")
+        doc.save(str(temp), **options)
+        temp.replace(output)
+    finally:
+        doc.close()
