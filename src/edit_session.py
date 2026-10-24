@@ -1,11 +1,13 @@
 """Per-tab transactional edit session with disk-backed undo/redo snapshots.
 
-Original PDFs are never changed until save() is explicitly requested.
+The operation journal lets object-based edits (such as moving a placed text box)
+replay later edits from the original file without flattening unrelated changes.
 """
 from __future__ import annotations
 
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from pdf_operations import (add_sticky_note, crop_page, delete_page, fill_form_fields,
@@ -17,6 +19,7 @@ class EditSession:
         self.original_path = Path(original_path).resolve()
         self._temp_dir = Path(tempfile.mkdtemp(prefix="northstar-edit-"))
         self._states: list[Path] = [self.original_path]
+        self._operations: list[tuple | None] = [None]
         self._cursor = 0
 
     @property
@@ -35,14 +38,51 @@ class EditSession:
     def can_redo(self) -> bool:
         return self._cursor < len(self._states) - 1
 
+    @property
+    def cursor(self) -> int:
+        return self._cursor
+
+    @property
+    def operations(self) -> tuple[tuple | None, ...]:
+        """Operation records corresponding to each saved state index."""
+        return tuple(self._operations)
+
     def apply_operation(self, operation, *args, **kwargs) -> Path:
         """Run a page edit against the current revision and add it to undo history."""
-        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
+        output = self._temp_dir / f"revision-{len(self._states)}-{uuid.uuid4().hex[:8]}.pdf"
         operation(self.working_path, output, *args, **kwargs)
         self._states = self._states[: self._cursor + 1]
+        self._operations = self._operations[: self._cursor + 1]
         self._states.append(output)
+        self._operations.append((operation, tuple(args), dict(kwargs)))
         self._cursor += 1
         return output
+
+    def replace_operation(self, state_index: int, operation, *args, **kwargs) -> Path:
+        """Replace one applied edit and replay later edits, preserving undo snapshots."""
+        if not 1 <= state_index <= self._cursor:
+            raise IndexError("The requested edit is not in the active document history.")
+        records = list(self._operations[1:self._cursor + 1])
+        records[state_index - 1] = (operation, tuple(args), dict(kwargs))
+        rebuilt = [self.original_path]
+        generated: list[Path] = []
+        try:
+            for index, (func, func_args, func_kwargs) in enumerate(records, 1):
+                output = self._temp_dir / f"rebuild-{uuid.uuid4().hex}-{index}.pdf"
+                func(rebuilt[-1], output, *func_args, **func_kwargs)
+                rebuilt.append(output)
+                generated.append(output)
+        except Exception:
+            for path in generated:
+                path.unlink(missing_ok=True)
+            raise
+        old_paths = self._states[1:]
+        self._states = rebuilt
+        self._operations = [None, *records]
+        self._cursor = len(rebuilt) - 1
+        for path in old_paths:
+            path.unlink(missing_ok=True)
+        return self.working_path
 
     def reorder(self, order: list[int], password: str | None = None) -> Path:
         return self.apply_operation(reorder_pages, order, password=password)
@@ -62,29 +102,14 @@ class EditSession:
 
     def rotate(self, page_index: int, degrees: int = 90,
                password: str | None = None) -> Path:
-        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
-        rotate_page(self.working_path, output, page_index, degrees, password)
-        self._states = self._states[: self._cursor + 1]
-        self._states.append(output)
-        self._cursor += 1
-        return output
+        return self.apply_operation(rotate_page, page_index, degrees, password=password)
 
     def delete_page(self, page_index: int, password: str | None = None) -> Path:
-        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
-        delete_page(self.working_path, output, page_index, password)
-        self._states = self._states[: self._cursor + 1]
-        self._states.append(output)
-        self._cursor += 1
-        return output
+        return self.apply_operation(delete_page, page_index, password=password)
 
     def add_sticky_note(self, page_index: int, text: str,
                         password: str | None = None) -> Path:
-        output = self._temp_dir / f"revision-{len(self._states)}.pdf"
-        add_sticky_note(self.working_path, output, page_index, text, password)
-        self._states = self._states[: self._cursor + 1]
-        self._states.append(output)
-        self._cursor += 1
-        return output
+        return self.apply_operation(add_sticky_note, page_index, text, password=password)
 
     def fill_fields(self, values: dict[str, str],
                     password: str | None = None) -> Path:
@@ -113,10 +138,12 @@ class EditSession:
             if staging.exists():
                 staging.unlink()
         self._states = [self.original_path]
+        self._operations = [None]
         self._cursor = 0
 
     def discard(self) -> Path:
         self._states = [self.original_path]
+        self._operations = [None]
         self._cursor = 0
         return self.original_path
 
