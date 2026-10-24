@@ -308,7 +308,11 @@ def protect_pdf(source: str | Path, output: str | Path, password: str,
 def add_rich_text_box(source: str | Path, output: str | Path, page_index: int,
                        rect: tuple[float, float, float, float], text: str,
                        style: dict, password: str | None = None) -> None:
-    """Add a formatted, editable FreeText annotation to a new PDF revision."""
+    """Write a formatted text box into page content so every viewer displays it.
+
+    Text remains selectable and searchable. It is staged as a normal PDF edit;
+    subsequent moving/resizing requires undoing and placing it again.
+    """
     import html
     import fitz
 
@@ -327,38 +331,35 @@ def add_rich_text_box(source: str | Path, output: str | Path, page_index: int,
             raise IndexError("Page index is outside the document.")
         page = doc[page_index]
         pdf_rect = fitz.Rect(*(float(value) for value in rect))
-        if pdf_rect.is_empty or pdf_rect.width < 4 or pdf_rect.height < 4:
-            raise ValueError("Text box must have positive width and height.")
+        if pdf_rect.is_empty or pdf_rect.width < 18 or pdf_rect.height < 12:
+            raise ValueError("Text box is too small. Drag a larger box on the page.")
         pdf_bounds = fitz.Rect(0, 0, page.rect.width, page.rect.height) * ~page.transformation_matrix
         if not pdf_bounds.contains(pdf_rect):
             raise ValueError("Text box must fit inside the page bounds.")
-        mupdf_rect = pdf_rect * page.transformation_matrix
+        page_rect = pdf_rect * page.transformation_matrix
 
         size = max(4.0, min(144.0, float(style.get("size", 12))))
         letter_spacing = max(0.0, min(20.0, float(style.get("letter_spacing", 0))))
         line_spacing = max(0.5, min(4.0, float(style.get("line_spacing", 1.0))))
         alignment = str(style.get("alignment", "left")).lower()
-        align_value = {"left": fitz.TEXT_ALIGN_LEFT, "center": fitz.TEXT_ALIGN_CENTER,
-                       "right": fitz.TEXT_ALIGN_RIGHT, "justify": fitz.TEXT_ALIGN_JUSTIFY}.get(alignment)
-        if align_value is None:
+        if alignment not in {"left", "center", "right", "justify"}:
             raise ValueError("Unknown text alignment.")
         weight = "bold" if style.get("bold") else "normal"
         italic = "italic" if style.get("italic") else "normal"
         decoration = "underline" if style.get("underline") else "none"
-        escaped = html.escape(text).replace("\n", "<br/>")
-        rich_text = (
-            f'<div style="font-family:sans-serif;font-size:{size:.2f}pt;'
+        escaped = html.escape(text).replace("\\n", "<br/>")
+        markup = (
+            f'<p style="font-family:sans-serif;font-size:{size:.2f}pt;'
             f'font-weight:{weight};font-style:{italic};text-decoration:{decoration};'
             f'letter-spacing:{letter_spacing:.2f}pt;line-height:{line_spacing * 100:.0f}%;'
-            f'text-align:{alignment};margin:0">{escaped}</div>'
+            f'text-align:{alignment};margin:0">{escaped}</p>'
         )
-        annot = page.add_freetext_annot(
-            mupdf_rect, rich_text, fontsize=size, richtext=True, align=align_value,
-            style=f"font-family:sans-serif;font-size:{size:.2f}pt;",
-            fill_color=(1, 1, 1), border_color=(0.18, 0.43, 0.82),
-            border_width=0.7, opacity=1,
-        )
-        annot.update()
+        # Keep a small inset so the text does not touch the visible box border.
+        text_rect = page_rect + (5, 4, -5, -4)
+        spare_height, _scale = page.insert_htmlbox(text_rect, markup, scale_low=1.0, overlay=True)
+        if spare_height < 0:
+            raise ValueError("The text does not fit in this box. Resize the box or reduce the font size.")
+        page.draw_rect(page_rect, color=(0.18, 0.43, 0.82), width=0.7, overlay=True)
         options = {"garbage": 3, "deflate": True}
         if encrypted:
             options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
