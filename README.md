@@ -16,7 +16,7 @@ The crop operation changes the visible crop box; underlying content outside the 
 
 ## Task workspaces and tool palette
 
-The workspace strip offers Home, Read, Edit, Organize, Comment, Fill & Sign, Protect, and Create & Convert presets inspired by familiar PDF editor workflows. The movable **Tools** dock filters to the actions currently implemented for each task. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect includes a local AES-256 password-protected copy action, along with save/export. Advanced features such as text/image object editing, OCR, signatures, true redaction, Office conversion, and PDF/A/X checks remain unavailable and are not shown as working controls.
+The workspace strip offers Home, Read, Edit, Organize, Comment, Fill & Sign, Protect, and Create & Convert presets inspired by familiar PDF editor workflows. The movable **Tools** dock filters to the actions currently implemented for each task. Drag its title bar to dock it in another area, or use **View → Tools** to show it again. The Read, Edit, Organize, Comment, Fill & Sign, and Create & Convert presets are connected to existing local operations; Protect includes a local AES-256 password-protected copy action, along with save/export. Text replacement is available from Tools → Edit existing text. It finds an exact phrase on the current page, redacts the old glyphs, and inserts a replacement at the same location; this is staged in the document edit session with undo/redo and save-on-demand. Font metrics and color are approximated, surrounding text does not reflow, and scanned pages need OCR first. PyMuPDF is AGPL-3.0-or-later or commercially licensed by Artifex; this private local build uses its AGPL package. Do not distribute without meeting its license obligations or obtaining an Artifex commercial license. Existing comment tools support direct mouse placement for text boxes, sticky notes, highlight, underline, strikethrough, freehand pen, lines, arrows, rectangles, and ellipses. OCR, signatures, Office conversion, and PDF/A/X checks remain unavailable.
 
 The selected workspace and dock layout are saved locally. Existing document tabs remain separate from the task workspace tabs.
 
@@ -49,6 +49,7 @@ The program installs a Python audit hook before importing Qt. It rejects Python 
 - **PDFium**: BSD-style license with additional bundled third-party notices. Qt's PDF module includes attribution and license data; release packaging must retain it.
 - **pypdf**: BSD-3-Clause; include the license notice when redistributing.
 - **cryptography**: Apache-2.0 or BSD-3-Clause; include applicable notices when redistributing.
+- **PyMuPDF**: AGPL-3.0-or-later or Artifex commercial license; distribution requires license compliance.
 - **PyInstaller**: GPL with a bootloader exception; include applicable notices.
 
 This application has not been legally reviewed. The build workflow includes library payloads in the executable, so do not sell or redistribute it until the Qt/PDFium/PyInstaller notice package and LGPL requirements have been verified for the exact versions.
