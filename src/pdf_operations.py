@@ -46,6 +46,58 @@ def _write(writer: PdfWriter, output: str | Path, password: str | None = None) -
             temp.unlink()
 
 
+def replace_existing_text(source: str | Path, output: str | Path, page_index: int,
+                          old_text: str, new_text: str,
+                          password: str | None = None) -> int:
+    """Replace exact selectable page text in a new PDF using redaction.
+
+    Font family/metrics are approximated from the first matching span. This
+    does not reflow surrounding paragraphs or reconstruct scanned page text.
+    PyMuPDF is AGPL-3.0-or-later or commercially licensed by Artifex.
+    """
+    import fitz
+
+    _require_new_output(source, output)
+    if not old_text.strip():
+        raise ValueError("Enter the existing text to replace.")
+    try:
+        doc = fitz.open(str(source))
+    except Exception as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
+    was_encrypted = doc.needs_pass
+    try:
+        if was_encrypted and not doc.authenticate(password or ""):
+            raise PermissionError("The PDF is encrypted; a valid password is required.")
+        if not 0 <= page_index < doc.page_count:
+            raise IndexError("Page index is outside the document.")
+        page = doc[page_index]
+        rectangles = page.search_for(old_text)
+        if not rectangles:
+            raise ValueError("No exact match was found on the current page.")
+        spans = [span for block in page.get_text("dict").get("blocks", [])
+                 for line in block.get("lines", []) for span in line.get("spans", [])]
+        style = next((span for span in spans if old_text in span.get("text", "")), {})
+        size = max(5.0, min(72.0, float(style.get("size", 11.0))))
+        value = int(style.get("color", 0))
+        color = ((value >> 16 & 255) / 255, (value >> 8 & 255) / 255,
+                 (value & 255) / 255)
+        for rect in rectangles:
+            page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
+        page.apply_redactions(images=0, graphics=0)
+        if new_text:
+            for rect in rectangles:
+                page.insert_text((rect.x0, min(rect.y1 - 1, rect.y0 + size)),
+                                 new_text, fontsize=size, color=color, overlay=True)
+        options = {"garbage": 3, "deflate": True}
+        if was_encrypted:
+            options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
+                           user_pw=password or "", owner_pw=password or "")
+        doc.save(str(output), **options)
+        return len(rectangles)
+    finally:
+        doc.close()
+
+
 def rotate_page(source: str | Path, output: str | Path, page_index: int,
                 degrees: int = 90, password: str | None = None) -> None:
     if degrees not in (90, 180, 270):
